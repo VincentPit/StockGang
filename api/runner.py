@@ -171,17 +171,19 @@ def _backtest_core(symbols: list, req: dict) -> dict:
     test_start = end_date - timedelta(days=req["lookback_days"])
 
     config = BacktestConfig(
-        symbols          = symbols,
-        start_date       = test_start,
-        end_date         = end_date,
-        initial_cash     = req["initial_cash"],
-        interval         = BarInterval.D1,
-        commission_rate  = req["commission_rate"],
-        slippage         = 0.0002,
-        apply_stamp_duty = True,
-        train_years      = 2,
-        stop_loss_pct    = req["stop_loss_pct"],
-        symbol_loss_cap  = req["symbol_loss_cap"],
+        symbols           = symbols,
+        start_date        = test_start,
+        end_date          = end_date,
+        initial_cash      = req["initial_cash"],
+        interval          = BarInterval.D1,
+        commission_rate   = req["commission_rate"],
+        slippage          = 0.0002,
+        apply_stamp_duty  = True,
+        train_years       = 2,
+        stop_loss_pct     = req["stop_loss_pct"],
+        symbol_loss_cap   = req["symbol_loss_cap"],
+        trailing_stop_pct = req.get("trailing_stop_pct", 0.0),
+        take_profit_pct   = req.get("take_profit_pct", 0.0),
     )
 
     lgbm = LGBMStrategy(

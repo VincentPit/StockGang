@@ -23,6 +23,8 @@ class BacktestRequest(BaseModel):
     commission_rate: float = Field(default=0.0003)
     stop_loss_pct: float = Field(default=-0.08, le=0)
     symbol_loss_cap: float = Field(default=-20_000.0, le=0)
+    trailing_stop_pct: float = Field(default=0.0, ge=0.0, description="Trailing stop fraction (0=disabled)")
+    take_profit_pct: float = Field(default=0.0, ge=0.0, description="Take-profit fraction (0=disabled)")
 
     @field_validator("symbols")
     @classmethod
@@ -226,6 +228,8 @@ class WorkflowRequest(BaseModel):
     commission_rate: float = Field(default=0.0003)
     stop_loss_pct: float = Field(default=-0.08, le=0)
     symbol_loss_cap: float = Field(default=-20_000.0, le=0)
+    trailing_stop_pct: float = Field(default=0.0, ge=0.0, description="Trailing stop fraction (0=disabled)")
+    take_profit_pct: float = Field(default=0.0, ge=0.0, description="Take-profit fraction (0=disabled)")
     indices: list[str] = Field(
         default=["000300"],
         description="CSI index codes to screen: 000300=CSI300, 000905=CSI500",
