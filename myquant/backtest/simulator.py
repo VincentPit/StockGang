@@ -46,8 +46,10 @@ class BacktestConfig:
     slippage: float = 0.0002
     apply_stamp_duty: bool = True
     train_years: int = 0   # if > 0, warm strategies on [start_date - train_years, start_date] data
-    stop_loss_pct: float = -0.08   # force-close any position down more than this fraction from cost
-    symbol_loss_cap: float = -20_000.0  # stop all new BUYs on a symbol once cumulative realized P&L < this
+    stop_loss_pct: float = -0.08       # force-close any position down more than this from cost
+    trailing_stop_pct: float = 0.0     # if > 0, trail stop this % below running price peak; 0 = off
+    take_profit_pct:   float = 0.0     # if > 0, lock in gains when PnL exceeds this %; 0 = off
+    symbol_loss_cap: float = -20_000.0 # stop all new BUYs on symbol once cumulative realized P&L < this
 
 
 @dataclass
@@ -124,7 +126,8 @@ class Backtester:
         self._bar_atr_pct:  dict[str, float]       = {}   # latest ATR fraction
         self._ma50_buf:     dict[str, list[float]] = {}   # rolling 50-bar close buffer
         self._ma50:         dict[str, float]       = {}   # latest MA50 value
-
+        # Per-symbol running price peak for trailing stop (reset on each new entry)
+        self._peak_price: dict[str, float] = {}
         # Current bar prices (used by broker for slippage)
         self._current_prices: dict[str, float] = {}
 
@@ -209,30 +212,53 @@ class Backtester:
             fake_tick = _bar_to_tick(bar)
             self._portfolio.on_tick(fake_tick)
 
-            # ── Stop-loss: force-close any position down beyond threshold ──
+            # ── Risk exits: stop-loss / trailing-stop / take-profit ────────
             pos = self._portfolio.positions.get(bar.symbol)
-            if (
-                pos is not None
-                and pos.is_long
-                and pos.pnl_pct < self.config.stop_loss_pct
-            ):
-                stop_sig = Signal(
-                    symbol      = bar.symbol,
-                    signal_type = SignalType.SELL,
-                    price       = bar.close,
-                    confidence  = 1.0,
-                    strategy_id = "stop_loss",
-                    metadata    = {"reason": f"stop_loss pnl={pos.pnl_pct:.1%}"},
-                )
-                # Bypass risk gate — stop-loss must always execute
-                qty = pos.quantity
-                await self._order_manager.process_signal(
-                    stop_sig, nav=self._portfolio.nav, adjusted_qty=qty
-                )
-                logger.info(
-                    "STOP-LOSS closed %s  qty=%d  pnl_pct=%.1f%%",
-                    bar.symbol, qty, pos.pnl_pct * 100,
-                )
+            if pos is not None and pos.is_long:
+                # Track running price peak for trailing stop (reset when position opened)
+                peak = self._peak_price.get(bar.symbol, pos.avg_cost)
+                if bar.close > peak:
+                    self._peak_price[bar.symbol] = bar.close
+                    peak = bar.close
+
+                exit_reason: str | None = None
+
+                # 1. Fixed stop-loss: position unrealised PnL below threshold from cost
+                if pos.pnl_pct < self.config.stop_loss_pct:
+                    exit_reason = f"stop_loss pnl={pos.pnl_pct:.1%}"
+
+                # 2. Trailing stop: close fell more than trailing_stop_pct from peak
+                elif self.config.trailing_stop_pct > 0:
+                    drop_from_peak = (bar.close - peak) / (peak + 1e-10)
+                    if drop_from_peak < -self.config.trailing_stop_pct:
+                        exit_reason = (
+                            f"trailing_stop drop={drop_from_peak:.1%} "
+                            f"from peak={peak:.2f}"
+                        )
+
+                # 3. Take-profit: unrealised PnL has hit the target
+                elif self.config.take_profit_pct > 0 and pos.pnl_pct >= self.config.take_profit_pct:
+                    exit_reason = f"take_profit pnl={pos.pnl_pct:.1%}"
+
+                if exit_reason:
+                    stop_sig = Signal(
+                        symbol      = bar.symbol,
+                        signal_type = SignalType.SELL,
+                        price       = bar.close,
+                        confidence  = 1.0,
+                        strategy_id = "risk_exit",
+                        metadata    = {"reason": exit_reason},
+                    )
+                    qty = pos.quantity
+                    # Bypass risk gate — risk exits must always execute
+                    await self._order_manager.process_signal(
+                        stop_sig, nav=self._portfolio.nav, adjusted_qty=qty
+                    )
+                    self._peak_price.pop(bar.symbol, None)  # reset for next entry
+                    logger.info(
+                        "RISK EXIT [%s] %s  qty=%d  pnl_pct=%.1f%%",
+                        exit_reason.split()[0], bar.symbol, qty, pos.pnl_pct * 100,
+                    )
 
             # Dispatch bar to strategies
             signals = self._registry.dispatch_bar(bar)

@@ -2,12 +2,14 @@
 Feature Engineer — converts a list of Bar objects into an ML-ready DataFrame.
 
 Features produced:
-  Momentum    : ret_1d, ret_5d, ret_10d, ret_20d, roc_10, roc_20
+  Momentum    : ret_1d, ret_5d, ret_10d, ret_20d
   Volatility  : vol_5d, vol_20d, atr_14
-  Trend       : rsi_14, macd_hist, macd_signal_ratio
-  Mean-revert : bb_pos (Bollinger Band position), bb_width
-  Volume      : vol_ratio (vs 20-day avg)
-  Range       : price_52w_pos (position within 52-week high/low)
+  Oscillators : rsi_14 (Wilder EWM), macd_hist, stoch_k/d, wr_14, cci_20
+  Mean-revert : bb_pos, bb_width, keltner_pos
+  Volume      : vol_ratio, cmf_20, vol_trend
+  Range       : price_52w_pos, atr_14
+  Regime      : vol_regime, trend_strength, above_ma50, ma_spread, ma50_slope
+  Microstr.   : close_loc, gap_pct
 
 Labels (for supervised training):
   make_labels() → ternary classification: 1=BUY, 0=HOLD, -1=SELL
@@ -34,7 +36,7 @@ FEATURE_COLS: list[str] = [
     # ── Volume & range ───────────────────────────────────────────────────
     "vol_ratio",
     "atr_14",
-    "roc_10", "roc_20",
+    "wr_14", "cci_20",        # Williams %R (14-period) + Commodity Channel Index (20-period)
     "price_52w_pos",
     # ── NEW: regime & microstructure features ────────────────────────────
     "vol_regime",      # rolling vol percentile — where is current vol vs history
@@ -98,8 +100,6 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     df["ret_5d"]  = close.pct_change(5)
     df["ret_10d"] = close.pct_change(10)
     df["ret_20d"] = close.pct_change(20)
-    df["roc_10"]  = close.pct_change(10)
-    df["roc_20"]  = close.pct_change(20)
 
     # ── Volatility ───────────────────────────────────────────
     df["vol_5d"]  = ret.rolling(5).std()
@@ -127,6 +127,21 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     roll_low14    = low.rolling(14).min()
     df["stoch_k"] = (close - roll_low14) / (roll_high14 - roll_low14 + 1e-10) * 100
     df["stoch_d"] = df["stoch_k"].rolling(3).mean()
+
+    # ── Williams %R (14-period) ───────────────────────────────
+    # Mirrors the 14-day high/low range in [0, 100] — inverse of Stochastic %K.
+    # 0 = price at 14-day high (overbought); 100 = price at 14-day low (oversold).
+    # Complementary to stoch_k: same window, opposite polarity.
+    df["wr_14"] = (roll_high14 - close) / (roll_high14 - roll_low14 + 1e-10) * 100
+
+    # ── Commodity Channel Index (20-period) ───────────────────
+    # Measures how far the typical price has deviated from its 20-day MA,
+    # scaled by mean absolute deviation.  Values outside ±100 signal extremes.
+    # Clipped to ±300 to suppress outliers in illiquid/thin-bar periods.
+    tp         = (high + low + close) / 3
+    tp_ma      = tp.rolling(20).mean()
+    tp_mad     = (tp - tp_ma).abs().rolling(20).mean()
+    df["cci_20"] = ((tp - tp_ma) / (0.015 * tp_mad + 1e-10)).clip(-300, 300)
 
     # ── MACD ─────────────────────────────────────────────────
     ema12        = close.ewm(span=12, adjust=False).mean()
@@ -259,8 +274,16 @@ def add_macro_features(df: pd.DataFrame, macro_snap) -> pd.DataFrame:
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / (loss + 1e-10)
+    """
+    Wilder's RSI using exponential smoothing (alpha = 1/period).
+
+    More faithful to Wilder's original formulation than a simple rolling mean;
+    produces smoother readings and better converges to the classic 70/30 levels.
+    """
+    delta    = series.diff()
+    gain     = delta.clip(lower=0)
+    loss     = (-delta.clip(upper=0))
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    rs       = avg_gain / (avg_loss + 1e-10)
     return 100 - 100 / (1 + rs)

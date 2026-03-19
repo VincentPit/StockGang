@@ -1,37 +1,38 @@
-# ── Stage 1: install production dependencies ─────────────────────────────────
-FROM node:20-alpine AS deps
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
+FROM python:3.13-slim
 
-# ── Stage 2: build Next.js (standalone output) ────────────────────────────────
-FROM node:20-alpine AS builder
+# ── System dependencies ───────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Non-root user ─────────────────────────────────────────────────────────────
+RUN groupadd --system app && useradd --system --gid app --no-create-home app
+
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+
+# ── Python dependencies (cached layer) ───────────────────────────────────────
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+# ── Application source ────────────────────────────────────────────────────────
 COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm run build
 
-# ── Stage 3: minimal production runtime ──────────────────────────────────────
-FROM node:20-alpine AS runner
-WORKDIR /app
+# ── Runtime directories owned by non-root user ────────────────────────────────
+RUN mkdir -p logs data && chown -R app:app /app
 
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-# Default API base for server-side rewrites; override at runtime via env / compose
-ENV API_BASE_URL=http://localhost:8000
-ENV PORT=3000
-ENV HOSTNAME=0.0.0.0
+USER app
 
-RUN addgroup --system --gid 1001 nodejs \
- && adduser  --system --uid 1001 nextjs
+EXPOSE 8000
 
-# standalone output contains server.js + a self-contained node_modules copy
-COPY --from=builder /app/public                          ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static     ./.next/static
+# ── Health check (relies on /api/health endpoint) ─────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+  CMD curl -f http://localhost:8000/api/health || exit 1
 
-USER nextjs
-EXPOSE 3000
-
-CMD ["node", "server.js"]
+# ── Default: FastAPI via uvicorn ──────────────────────────────────────────────
+CMD ["uvicorn", "api.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "1", \
+     "--log-level", "info"]

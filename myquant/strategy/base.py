@@ -33,8 +33,10 @@ class BaseStrategy(ABC):
         self.is_active: bool = True
 
         # Per-symbol bar history buffer (keep last N bars)
+        # 756 = 3 years of daily bars (252 × 3), providing enough history for
+        # the 252-bar vol-regime rolling window PLUS max_train_bars=504.
         self._bar_buffer: dict[str, deque[Bar]] = {
-            sym: deque(maxlen=500) for sym in symbols
+            sym: deque(maxlen=756) for sym in symbols
         }
         # Latest tick per symbol
         self._last_tick: dict[str, Tick] = {}
@@ -87,7 +89,7 @@ class BaseStrategy(ABC):
 
     def warm_bars(self, symbol: str, bars: list[Bar]) -> None:
         """Pre-load historical bars into the buffer (called during on_start)."""
-        buf = self._bar_buffer.setdefault(symbol, deque(maxlen=500))
+        buf = self._bar_buffer.setdefault(symbol, deque(maxlen=756))
         for bar in bars:
             buf.append(bar)
 

@@ -33,17 +33,19 @@ class RiskGate:
     Layers:
         1. Market state filter   — no trading during halt / auction / off-hours
         2. Throttle limiter      — max orders per minute
-        3. Daily drawdown circuit breaker
-        4. Position limit check  — max single position % of NAV
-        5. Sector exposure check — max sector % of NAV
-        6. VaR check             — 1-day 95% VaR must stay under limit
-        7. Cooldown timer        — no repeated trade same symbol within N seconds
+        3. Daily drawdown circuit breaker — new entries halted at daily loss limit
+        4. Cooldown timer        — no repeated entry for same symbol within N seconds
+        5. Position limit check  — max single position % of NAV
+        6. Sector exposure check — max sector % of NAV
+        7. VaR check             — 1-day 95% parametric VaR must stay under limit
     """
 
     def __init__(
         self,
         nav_getter,       # callable: () -> float — returns current NAV
         positions_getter, # callable: () -> dict[str, Position]
+        var_limit_pct: float = 0.08,       # max 1-day 95% VaR as fraction of NAV
+        default_daily_vol: float = 0.020,  # default daily vol estimate (2% for A-shares)
     ) -> None:
         self._get_nav = nav_getter
         self._get_positions = positions_getter
@@ -62,10 +64,28 @@ class RiskGate:
         # Sector mapping (symbol → sector)
         self._sector_map: dict[str, str] = {}
 
+        # VaR parameters
+        self._var_limit_pct: float = var_limit_pct
+        self._default_vol:   float = default_daily_vol
+        self._vol_estimates: dict[str, float] = {}   # per-symbol daily vol, injected externally
+
     # ── Public ────────────────────────────────────────────────
 
     def set_sector_map(self, sector_map: dict[str, str]) -> None:
         self._sector_map = sector_map
+
+    def set_vol_estimate(self, symbol: str, daily_vol_pct: float) -> None:
+        """Inject a per-symbol daily-return volatility estimate for VaR calculation."""
+        self._vol_estimates[symbol] = daily_vol_pct
+
+    def set_vol_estimates(self, estimates: dict[str, float]) -> None:
+        """
+        Bulk-update per-symbol daily volatility estimates.
+
+        Args:
+            estimates: Mapping of symbol → daily vol fraction (e.g. 0.018 = 1.8%).
+        """
+        self._vol_estimates.update(estimates)
 
     def evaluate(
         self,
@@ -89,6 +109,7 @@ class RiskGate:
             lambda s: self._check_cooldown(s, sim_epoch),
             self._check_position_limit,
             self._check_sector_limit,
+            self._check_var,          # 7. VaR check
         ]
         final = RiskDecision(approved=True)
         for check in checks:
@@ -183,6 +204,12 @@ class RiskGate:
         return RiskDecision(approved=True)
 
     def _check_drawdown(self, signal: Signal) -> RiskDecision:
+        # Allow exits (SELL/CLOSE) even when drawdown limit is hit.
+        # Only new entries (BUY) should be halted to stop digging the hole deeper.
+        is_exit = signal.signal_type in (SignalType.SELL, SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT)
+        if is_exit:
+            return RiskDecision(approved=True)
+
         if self._daily_start_nav is None or self._daily_start_nav == 0:
             return RiskDecision(approved=True)
 
@@ -194,7 +221,7 @@ class RiskGate:
                 approved=False,
                 reason=(
                     f"Daily drawdown limit hit: {drawdown:.2%} < "
-                    f"{settings.DAILY_DRAWDOWN_LIMIT:.2%}. All new entries halted."
+                    f"{settings.DAILY_DRAWDOWN_LIMIT:.2%}. New entries halted."
                 ),
             )
         return RiskDecision(approved=True)
@@ -204,6 +231,11 @@ class RiskGate:
         signal: Signal,
         sim_epoch: Optional[float] = None,
     ) -> RiskDecision:
+        # Exits (SELL/CLOSE) must never be delayed by cooldown — allow immediately.
+        is_exit = signal.signal_type in (SignalType.SELL, SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT)
+        if is_exit:
+            return RiskDecision(approved=True)
+
         last = self._last_order_time.get(signal.symbol, 0)
         now = sim_epoch if sim_epoch is not None else time.monotonic()
         elapsed = now - last
@@ -288,6 +320,64 @@ class RiskGate:
         return RiskDecision(approved=True)
 
     # ── Internal ──────────────────────────────────────────────
+
+    def _check_var(self, signal: Signal) -> RiskDecision:
+        """
+        Parametric 1-day 95% Value-at-Risk check.
+
+        Rejects new BUY entries when the combined portfolio VaR (existing
+        positions + proposed trade) would exceed ``_var_limit_pct`` × NAV.
+
+            VaR_i = abs(market_value_i) × daily_vol_i × 1.645
+
+        Assumes independent, normally distributed daily returns.  Inject
+        accurate per-symbol vol estimates via ``set_vol_estimate()`` for
+        better accuracy; defaults to ``_default_vol`` (2% for A-shares).
+        """
+        is_exit = signal.signal_type in (
+            SignalType.SELL, SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT
+        )
+        if is_exit:
+            return RiskDecision(approved=True)
+
+        nav = self._get_nav()
+        if nav <= 0:
+            return RiskDecision(approved=True)
+
+        z95       = 1.645
+        positions = self._get_positions()
+
+        # VaR contribution from existing open positions
+        portfolio_var = sum(
+            abs(pos.market_value) * self._vol_estimates.get(sym, self._default_vol)
+            for sym, pos in positions.items()
+        ) * z95
+
+        # VaR contribution from the proposed new position.
+        # Use the position-limit-capped notional so VaR and position-limit
+        # don't double-count the same risk: the effective exposure is
+        # min(raw_notional, remaining room to MAX_POSITION_PCT limit).
+        pos               = positions.get(signal.symbol)
+        current_exposure  = abs(pos.market_value) if pos else 0.0
+        max_new_notional  = max(0.0, settings.MAX_POSITION_PCT * nav - current_exposure)
+        raw_notional      = signal.price * (signal.quantity or 100)
+        proposed_notional = min(raw_notional, max_new_notional)
+        proposed_var      = proposed_notional * self._vol_estimates.get(
+            signal.symbol, self._default_vol
+        ) * z95
+
+        total_var = portfolio_var + proposed_var
+        var_pct   = total_var / nav
+
+        if var_pct > self._var_limit_pct:
+            return RiskDecision(
+                approved=False,
+                reason=(
+                    f"VaR limit exceeded: {var_pct:.1%} > {self._var_limit_pct:.1%} of NAV "
+                    f"(portfolio={portfolio_var:,.0f}, proposed={proposed_var:,.0f})"
+                ),
+            )
+        return RiskDecision(approved=True)
 
     def _record_order(
         self,

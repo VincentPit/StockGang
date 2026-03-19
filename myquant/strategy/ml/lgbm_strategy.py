@@ -62,17 +62,18 @@ class LGBMStrategy(BaseStrategy):
 
     Parameters
     ----------
-    forward_days    : Label horizon — forward N-day return for classification.
-    threshold       : Minimum absolute forward return to trigger directional label.
-    train_ratio     : Fraction of labeled rows used for training + calibration
-                      (rest = OOS validation).  Within this training portion,
-                      the last 25% is reserved as the early-stopping / calibration
-                      holdout; LightGBM itself trains on the first 75%.
-    min_confidence  : Minimum predicted class probability (post-calibration) to emit a signal.
-    retrain_every   : Re-train every N on_bar() calls (0 = never re-train after start).
-    use_macro       : If True, attempt to inject macro features (requires MacroFetcher).
-    calibrate       : If True, wrap the trained LightGBM model in an isotonic-regression
-                      calibrator for more reliable probability estimates.
+    forward_days       : Label horizon — forward N-day return for classification.
+    threshold          : Minimum absolute forward return to trigger directional label.
+    train_ratio        : Fraction of labeled rows used for training + calibration
+                         (rest = OOS validation).
+    min_confidence     : Minimum predicted class probability to emit a signal.
+    retrain_every      : Re-train every N on_bar() calls (0 = never re-train after start).
+    n_ensemble_windows : Number of walk-forward temporal windows for ensemble training.
+                         Each sub-model is trained on a different rolling window slice:
+                         window 0 = full, window 1 = 75%, window 2 = 50%, …
+                         Predicted probabilities are averaged across all sub-models.
+    use_macro          : If True, attempt to inject macro features (requires MacroFetcher).
+    calibrate          : If True, apply sigmoid (Platt) calibration to each sub-model.
     """
 
     def __init__(
@@ -83,46 +84,48 @@ class LGBMStrategy(BaseStrategy):
         threshold: float = 0.015,
         train_ratio: float = 0.70,
         min_confidence: float = 0.52,
-        retrain_every: int = 63,      # quarterly rolling retrain (0 = disabled)
-        max_train_bars: int = 504,    # rolling window: ~2 years of daily bars
+        retrain_every: int = 63,         # quarterly rolling retrain (0 = disabled)
+        max_train_bars: int = 504,       # rolling window: ~2 years of daily bars
+        n_ensemble_windows: int = 3,     # walk-forward ensemble: K temporal slices
         use_macro: bool = False,
         calibrate: bool = True,
         # ── LightGBM hyperparameters ────────────────────────────────────
-        num_leaves: int = 63,         # was 31; deeper trees capture more non-linearity
-        n_estimators: int = 500,      # upper bound — early stopping cuts this in practice
-        learning_rate: float = 0.03,  # slower LR pairs well with more trees
+        num_leaves: int = 63,
+        n_estimators: int = 500,
+        learning_rate: float = 0.03,
     ) -> None:
         super().__init__(strategy_id, symbols)
-        self.forward_days   = forward_days
-        self.threshold      = threshold
-        self.train_ratio    = train_ratio
-        self.min_confidence = min_confidence
-        self.retrain_every  = retrain_every
-        self.max_train_bars = max_train_bars  # rolling window cap
-        self.use_macro      = use_macro
-        self.calibrate      = calibrate
+        self.forward_days        = forward_days
+        self.threshold           = threshold
+        self.train_ratio         = train_ratio
+        self.min_confidence      = min_confidence
+        self.retrain_every       = retrain_every
+        self.max_train_bars      = max_train_bars
+        self.n_ensemble_windows  = max(1, n_ensemble_windows)
+        self.use_macro           = use_macro
+        self.calibrate           = calibrate
 
         self._lgb_params = dict(
             num_leaves        = num_leaves,
             n_estimators      = n_estimators,
             learning_rate     = learning_rate,
-            feature_fraction  = 0.75,    # was 0.80; slight reduction reduces correlation
-            bagging_fraction  = 0.75,    # was 0.80
+            feature_fraction  = 0.75,
+            bagging_fraction  = 0.75,
             bagging_freq      = 5,
-            min_child_samples = 25,      # was 20; slightly higher for smoother splits
-            reg_alpha         = 0.05,    # L1 regularisation (new)
-            reg_lambda        = 0.10,    # L2 regularisation (new)
-            min_split_gain    = 0.001,   # minimum gain to create a split (new)
+            min_child_samples = 25,
+            reg_alpha         = 0.05,
+            reg_lambda        = 0.10,
+            min_split_gain    = 0.001,
             verbose           = -1,
             class_weight      = "balanced",
         )
 
         # Per-symbol state
-        self._models:      dict[str, "lgb.LGBMClassifier"] = {}
-        self._cal_models:  dict[str, Any]                  = {}  # calibrated wrappers
-        self._is_trained:  dict[str, bool]                 = {}
-        self._bar_counter: dict[str, int]                  = {}
-        self._feat_cols:   dict[str, list[str]]            = {}  # actual cols used
+        self._models:      dict[str, Any]        = {}   # raw model for feature_importances_
+        self._ensemble:    dict[str, list[Any]]  = {}   # K calibrated models per symbol
+        self._is_trained:  dict[str, bool]       = {}
+        self._bar_counter: dict[str, int]        = {}
+        self._feat_cols:   dict[str, list[str]]  = {}
 
         # Optional: injected MacroFetcher
         self._macro_fetcher = None
@@ -166,70 +169,44 @@ class LGBMStrategy(BaseStrategy):
 
         return self._predict_signal(symbol, bar)
 
-    # ── Training ──────────────────────────────────────────────────────────
+    # ── Training helpers ──────────────────────────────────────────────────────
 
-    def _train(self, symbol: str) -> None:
-        if not _HAS_LGB:
-            return
+    def _train_one_window(
+        self,
+        aligned: pd.DataFrame,
+        feat_cols: list[str],
+    ) -> tuple[Any, Any]:
+        """
+        Fit a single (raw, calibrated) LightGBM model on a pre-labeled slice.
 
-        bars = list(self._bar_buffer.get(symbol, []))
+        Parameters
+        ----------
+        aligned   : DataFrame with feature columns and a ``label`` column (−1/0/+1).
+        feat_cols : Feature column names to use as model input.
 
-        # Walk-forward: train only on the most recent rolling window.
-        # This prevents the model from being anchored to stale market regimes
-        # and reduces the risk of overfitting to the distant past.
-        if self.max_train_bars > 0 and len(bars) > self.max_train_bars:
-            bars = bars[-self.max_train_bars:]
-
-        if len(bars) < max(100, self.forward_days * 5 + 30):
-            logger.debug(
-                "LGBMStrategy: not enough bars for %s (%d)", symbol, len(bars)
-            )
-            return
-
-        df = bars_to_features(bars)
-        if df.empty:
-            return
-
-        # Optionally enrich with macro
-        feat_cols = list(FEATURE_COLS)
-        if self.use_macro and self._macro_fetcher is not None:
-            try:
-                snap = self._macro_fetcher.fetch()
-                df   = add_macro_features(df, snap)
-                feat_cols = feat_cols + _MACRO_EXTRA_COLS
-            except Exception as e:
-                logger.debug("LGBMStrategy: macro enrichment failed: %s", e)
-
-        labels = make_labels(df, self.forward_days, self.threshold)
-        aligned = df.join(labels.rename("label")).dropna()
-
-        if len(aligned) < 60:
-            logger.debug("LGBMStrategy: too few labeled rows for %s (%d)", symbol, len(aligned))
-            return
-
-        # ── 3-way temporal split ──────────────────────────────────
-        # │ 60% LGBM train │ 15% early-stop + calib │ 25% OOS accuracy │
-        # └─────────────────────────────────────────────────────────┘
-        n = len(aligned)
-        n_lgbm  = int(n * 0.60)            # pure training rows
-        n_calib = int(n * 0.15)            # early-stopping + calibration rows
+        Returns
+        -------
+        (raw_model, cal_model) — cal_model may equal raw_model when calibration skipped.
+        Returns (None, None) if the slice is too small to train reliably.
+        """
+        n       = len(aligned)
+        n_lgbm  = int(n * 0.60)
+        n_calib = int(n * 0.15)
 
         if n_lgbm < 40 or n_calib < 10:
-            # Fall back to simple 70 / 30 split when data is scarce
             n_train = int(n * self.train_ratio)
+            if n_train < 20:
+                return None, None
             X_train = aligned.iloc[:n_train][feat_cols]
             y_train = aligned.iloc[:n_train]["label"] + 1
             X_val   = aligned.iloc[n_train:][feat_cols]
             y_val   = aligned.iloc[n_train:]["label"] + 1
-            X_oos, y_oos = X_val, y_val
             use_early_stop = False
         else:
             X_train = aligned.iloc[:n_lgbm][feat_cols]
             y_train = aligned.iloc[:n_lgbm]["label"] + 1
             X_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib][feat_cols]
             y_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib]["label"] + 1
-            X_oos   = aligned.iloc[n_lgbm + n_calib:][feat_cols]
-            y_oos   = aligned.iloc[n_lgbm + n_calib:]["label"] + 1
             use_early_stop = True
 
         model = lgb.LGBMClassifier(**self._lgb_params)
@@ -243,7 +220,6 @@ class LGBMStrategy(BaseStrategy):
                     callbacks=[_es(50, verbose=False), _le(period=0)],
                 )
             except Exception:
-                # Older LightGBM (< 4.0) fallback
                 model.fit(X_train, y_train,
                           eval_set=[(X_val, y_val)],
                           early_stopping_rounds=50,
@@ -251,11 +227,7 @@ class LGBMStrategy(BaseStrategy):
         else:
             model.fit(X_train, y_train)
 
-        # ── Optional probability calibration ──────────────────────────
-        # Sigmoid (Platt scaling) maps raw LGBM probas through a 2-param
-        # sigmoid fit on the calibration holdout — produces more reliable
-        # confidence scores for use as the trading threshold gate.
-        cal_model = model  # fallback: uncalibrated
+        cal_model = model
         if self.calibrate and use_early_stop and len(X_val) >= 20:
             try:
                 from sklearn.calibration import CalibratedClassifierCV
@@ -267,28 +239,92 @@ class LGBMStrategy(BaseStrategy):
             except Exception as e:
                 logger.debug("LGBMStrategy: calibration failed (%s) — using raw probas", e)
 
-        self._models[symbol]     = model       # raw model (for feature_importances_)
-        self._cal_models[symbol] = cal_model   # calibrated model (for predict_proba)
+        return model, cal_model
+
+    # ── Training ──────────────────────────────────────────────────────────
+
+    def _train(self, symbol: str) -> None:
+        if not _HAS_LGB:
+            return
+
+        all_bars = list(self._bar_buffer.get(symbol, []))
+        if self.max_train_bars > 0 and len(all_bars) > self.max_train_bars:
+            all_bars = all_bars[-self.max_train_bars:]
+
+        if len(all_bars) < max(100, self.forward_days * 5 + 30):
+            logger.debug("LGBMStrategy: not enough bars for %s (%d)", symbol, len(all_bars))
+            return
+
+        # ── Feature engineering on the full capped window ────────────────
+        df = bars_to_features(all_bars)
+        if df.empty:
+            return
+
+        feat_cols = list(FEATURE_COLS)
+        if self.use_macro and self._macro_fetcher is not None:
+            try:
+                snap = self._macro_fetcher.fetch()
+                df   = add_macro_features(df, snap)
+                feat_cols = feat_cols + _MACRO_EXTRA_COLS
+            except Exception as e:
+                logger.debug("LGBMStrategy: macro enrichment failed: %s", e)
+
+        labels  = make_labels(df, self.forward_days, self.threshold)
+        aligned = df.join(labels.rename("label")).dropna()
+
+        if len(aligned) < 60:
+            logger.debug("LGBMStrategy: too few labeled rows for %s (%d)", symbol, len(aligned))
+            return
+
+        # ── Walk-forward ensemble ─────────────────────────────────────────
+        # Train K sub-models on K temporal slices of the aligned data.
+        # Slice widths decrease from 100% → 50% in equal steps.
+        # Final probability = element-wise mean across K calibrated models.
+        n = len(aligned)
+        window_fracs = [
+            max(0.5, 1.0 - i * (0.5 / max(1, self.n_ensemble_windows - 1)))
+            for i in range(self.n_ensemble_windows)
+        ]
+        window_sizes = sorted(
+            {max(60, int(n * f)) for f in window_fracs}, reverse=True
+        )
+
+        ensemble:          list[Any] = []
+        raw_model_primary: Any      = None
+
+        for idx, win_size in enumerate(window_sizes):
+            aligned_slice    = aligned.iloc[-win_size:]
+            raw_m, cal_m     = self._train_one_window(aligned_slice, feat_cols)
+            if cal_m is None:
+                continue
+            ensemble.append(cal_m)
+            if idx == 0:
+                raw_model_primary = raw_m
+
+        if not ensemble:
+            logger.debug("LGBMStrategy: all sub-models failed for %s", symbol)
+            return
+
+        self._models[symbol]     = raw_model_primary or ensemble[0]
+        self._ensemble[symbol]   = ensemble
         self._is_trained[symbol] = True
         self._feat_cols[symbol]  = feat_cols
 
-        # OOS accuracy
-        if len(X_oos) > 0:
-            acc  = (cal_model.predict(X_oos) == y_oos.values).mean()
-            dist = dict(zip(*np.unique(y_train.values, return_counts=True)))
-            logger.info(
-                "LGBMStrategy [%s] %s | lgbm_train=%d calib=%d OOS=%d acc=%.1f%% | "
-                "label dist SELL:%d HOLD:%d BUY:%d",
-                self.strategy_id, symbol,
-                len(X_train), len(X_val), len(X_oos), acc * 100,
-                dist.get(0, 0), dist.get(1, 0), dist.get(2, 0),
-            )
+        dist = dict(zip(*np.unique(
+            (aligned.iloc[:int(n * 0.60)]["label"] + 1).values, return_counts=True
+        )))
+        logger.info(
+            "LGBMStrategy [%s] %s | ensemble=%d models | windows=%s | "
+            "label dist SELL:%d HOLD:%d BUY:%d",
+            self.strategy_id, symbol, len(ensemble), window_sizes[:len(ensemble)],
+            dist.get(0, 0), dist.get(1, 0), dist.get(2, 0),
+        )
 
     # ── Inference ─────────────────────────────────────────────────────────
 
     def _predict_signal(self, symbol: str, bar: Bar) -> Optional[Signal]:
-        model = self._models.get(symbol)
-        if model is None:
+        ensemble = self._ensemble.get(symbol)
+        if not ensemble:
             return None
 
         bars = list(self._bar_buffer.get(symbol, []))
@@ -296,7 +332,7 @@ class LGBMStrategy(BaseStrategy):
         if df.empty:
             return None
 
-        feat_cols = self._feat_cols.get(symbol, FEATURE_COLS)
+        feat_cols = self._feat_cols.get(symbol, list(FEATURE_COLS))
 
         if self.use_macro and self._macro_fetcher is not None:
             try:
@@ -310,11 +346,12 @@ class LGBMStrategy(BaseStrategy):
 
         latest = df.iloc[[-1]][feat_cols]
 
-        # Use calibrated model for probabilities if available
-        infer_model = self._cal_models.get(symbol, model)
-        proba  = infer_model.predict_proba(latest)[0]  # [p_sell, p_hold, p_buy]
-        pred   = int(infer_model.predict(latest)[0])   # 0=SELL, 1=HOLD, 2=BUY
-        conf   = float(proba[pred])
+        # Average predicted probabilities across all K ensemble members.
+        # Each member returns shape (1, 3) → [p_sell, p_hold, p_buy].
+        all_probas = np.array([m.predict_proba(latest)[0] for m in ensemble])
+        avg_proba  = all_probas.mean(axis=0)    # (3,)
+        pred       = int(np.argmax(avg_proba))  # 0=SELL  1=HOLD  2=BUY
+        conf       = float(avg_proba[pred])
 
         if conf < self.min_confidence:
             return None
@@ -326,10 +363,11 @@ class LGBMStrategy(BaseStrategy):
                 strength=strength,
                 metadata={
                     "confidence": round(conf, 4),
-                    "p_buy":  round(float(proba[2]), 4),
-                    "p_hold": round(float(proba[1]), 4),
-                    "p_sell": round(float(proba[0]), 4),
-                    "model":  "lgbm",
+                    "p_buy":    round(float(avg_proba[2]), 4),
+                    "p_hold":   round(float(avg_proba[1]), 4),
+                    "p_sell":   round(float(avg_proba[0]), 4),
+                    "model":    "lgbm_ensemble",
+                    "n_models": len(ensemble),
                 },
             )
 
@@ -340,10 +378,11 @@ class LGBMStrategy(BaseStrategy):
                 strength=strength,
                 metadata={
                     "confidence": round(conf, 4),
-                    "p_buy":  round(float(proba[2]), 4),
-                    "p_hold": round(float(proba[1]), 4),
-                    "p_sell": round(float(proba[0]), 4),
-                    "model":  "lgbm",
+                    "p_buy":    round(float(avg_proba[2]), 4),
+                    "p_hold":   round(float(avg_proba[1]), 4),
+                    "p_sell":   round(float(avg_proba[0]), 4),
+                    "model":    "lgbm_ensemble",
+                    "n_models": len(ensemble),
                 },
             )
 

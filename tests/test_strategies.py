@@ -145,8 +145,20 @@ class TestFeatureEngineer:
         assert df[FEATURE_COLS].isna().sum().sum() == 0
 
     def test_feature_count_matches(self):
-        """FEATURE_COLS should have exactly 28 entries (23 existing + 5 new)."""
+        """FEATURE_COLS should have exactly 28 entries (26 core + 2 replacing roc_10/roc_20)."""
         assert len(FEATURE_COLS) == 28
+
+    def test_wr_14_range(self):
+        """Williams %R (inverted, normalised) must be in [0, 100]."""
+        df = bars_to_features(self.BARS)
+        assert df["wr_14"].min() >= 0.0 - 1e-9
+        assert df["wr_14"].max() <= 100.0 + 1e-9
+
+    def test_cci_20_clipped(self):
+        """CCI-20 must be within [\u2212300, +300] after clipping."""
+        df = bars_to_features(self.BARS)
+        assert df["cci_20"].min() >= -300.0 - 1e-9
+        assert df["cci_20"].max() <=  300.0 + 1e-9
 
     def test_stoch_k_range(self):
         """Stochastic %K must be in [0, 100]."""
@@ -208,3 +220,72 @@ class TestFeatureEngineer:
         df = bars_to_features(self.BARS)
         in_range = ((df["bb_pos"] >= 0) & (df["bb_pos"] <= 1)).mean()
         assert in_range > 0.80, f"bb_pos out-of-range fraction too high: {1 - in_range:.2%}"
+
+    def test_wr_14_complement_of_stoch_k(self):
+        """wr_14 + stoch_k must equal 100 for any row (they are perfect inverses)."""
+        df = bars_to_features(self.BARS)
+        diff = (df["wr_14"] + df["stoch_k"]).sub(100).abs()
+        assert diff.max() < 1e-6, "wr_14 and stoch_k should sum to 100"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestLGBMEnsemble — integration smoke-test for the walk-forward ensemble
+# ══════════════════════════════════════════════════════════════════════════════
+
+try:
+    import lightgbm  # noqa: F401
+    _HAS_LGB_FOR_TEST = True
+except ImportError:
+    _HAS_LGB_FOR_TEST = False
+
+
+@pytest.mark.skipif(not _HAS_LGB_FOR_TEST, reason="lightgbm not installed")
+class TestLGBMEnsemble:
+    """Smoke-tests that LGBMStrategy with n_ensemble_windows trains and predicts."""
+
+    SYMBOL = "sh600519"
+
+    def _strategy(self, n_windows: int = 2) -> "LGBMStrategy":
+        from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
+        return LGBMStrategy(
+            "test_ens",
+            [self.SYMBOL],
+            n_ensemble_windows=n_windows,
+            max_train_bars=260,
+            min_confidence=0.0,   # emit all signals so predict path is exercised
+        )
+
+    def test_ensemble_trains(self):
+        """Strategy should be marked trained and hold K calibrated sub-models."""
+        import asyncio
+        s = self._strategy(n_windows=2)
+        bars = _make_bars(260, self.SYMBOL)
+        s.warm_bars(self.SYMBOL, bars)
+        asyncio.run(s.on_start())
+
+        assert s._is_trained.get(self.SYMBOL, False), "Strategy should be trained"
+        ens = s._ensemble.get(self.SYMBOL, [])
+        assert len(ens) >= 1, "Ensemble should contain at least one sub-model"
+
+    def test_ensemble_predict_no_crash(self):
+        """Calling on_bar after training should return Signal or None without error."""
+        import asyncio
+        from myquant.models.signal import Signal
+        s = self._strategy(n_windows=2)
+        bars = _make_bars(260, self.SYMBOL)
+        s.warm_bars(self.SYMBOL, bars)
+        asyncio.run(s.on_start())
+
+        result = s.on_bar(bars[-1])
+        assert result is None or isinstance(result, Signal)
+
+    def test_single_window_still_trains(self):
+        """n_ensemble_windows=1 should produce a single-model ensemble."""
+        import asyncio
+        s = self._strategy(n_windows=1)
+        bars = _make_bars(260, self.SYMBOL)
+        s.warm_bars(self.SYMBOL, bars)
+        asyncio.run(s.on_start())
+
+        ens = s._ensemble.get(self.SYMBOL, [])
+        assert len(ens) == 1

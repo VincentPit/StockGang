@@ -153,23 +153,147 @@ def _df_to_bars(symbol: str, df: pd.DataFrame) -> list:
     return bars
 
 
+# ── Ensemble model wrapper ────────────────────────────────────────────────────
+
+class _EnsembleModel:
+    """
+    Picklable wrapper that averages ``predict_proba`` across K sub-models.
+
+    Each sub-model is an independently trained (and calibrated) LGBMClassifier
+    over a different temporal window slice of the training data.  Averaging their
+    probability outputs reduces sensitivity to any single training window and
+    yields more robust uncertainty estimates.
+
+    The class presents a minimal sklearn-style classifier interface so it is a
+    drop-in replacement wherever a plain LGBMClassifier is expected.
+    """
+
+    def __init__(self, models: list) -> None:
+        self.models = models  # list[CalibratedClassifierCV | LGBMClassifier]
+
+    # ── Classifier interface ──────────────────────────────────────────────
+
+    def predict_proba(self, X) -> "np.ndarray":
+        """Return averaged probability matrix, shape (n_samples, n_classes)."""
+        import numpy as np
+        arrays = np.array([m.predict_proba(X) for m in self.models])  # (K, n, 3)
+        return arrays.mean(axis=0)                                      # (n, 3)
+
+    def predict(self, X) -> "np.ndarray":
+        """Return predicted class (argmax of averaged probas), shape (n_samples,)."""
+        import numpy as np
+        return np.argmax(self.predict_proba(X), axis=1)
+
+    # ── Introspection helpers ─────────────────────────────────────────────
+
+    @property
+    def estimator(self):
+        """
+        Unwrap to the raw LGBMClassifier inside the first sub-model.
+        Used by ``_feature_importance()`` to reach ``feature_importances_``.
+        ``CalibratedClassifierCV`` exposes its base via ``.estimator``.
+        """
+        first = self.models[0]
+        return getattr(first, "estimator", first)
+
+
+def _train_single_window(
+    feat_cols: list[str],
+    aligned: "pd.DataFrame",
+    lgb_params: dict,
+    train_ratio: float,
+) -> Any:
+    """
+    Train a single calibrated sub-model on one temporal slice.
+
+    Parameters
+    ----------
+    feat_cols   : Feature column names.
+    aligned     : DataFrame with feature columns + ``label`` column.
+    lgb_params  : LightGBM hyperparameters dict.
+    train_ratio : Fallback train/val split fraction when data is scarce.
+
+    Returns
+    -------
+    Calibrated model, or ``None`` if the slice is too small.
+    """
+    try:
+        import lightgbm as lgb
+        from sklearn.calibration import CalibratedClassifierCV
+    except ImportError:
+        return None
+
+    n       = len(aligned)
+    n_lgbm  = int(n * 0.60)
+    n_calib = int(n * 0.15)
+
+    if n_lgbm < 40 or n_calib < 10:
+        n_train = int(n * train_ratio)
+        if n_train < 20:
+            return None
+        X_train = aligned.iloc[:n_train][feat_cols]
+        y_train = aligned.iloc[:n_train]["label"] + 1
+        X_val   = aligned.iloc[n_train:][feat_cols]
+        y_val   = aligned.iloc[n_train:]["label"] + 1
+        use_early_stop = False
+    else:
+        X_train = aligned.iloc[:n_lgbm][feat_cols]
+        y_train = aligned.iloc[:n_lgbm]["label"] + 1
+        X_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib][feat_cols]
+        y_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib]["label"] + 1
+        use_early_stop = True
+
+    model = lgb.LGBMClassifier(**lgb_params)
+
+    if use_early_stop:
+        try:
+            from lightgbm import early_stopping as _es, log_evaluation as _le
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                callbacks=[_es(50, verbose=False), _le(period=0)],
+            )
+        except Exception:
+            model.fit(X_train, y_train,
+                      eval_set=[(X_val, y_val)],
+                      early_stopping_rounds=50,
+                      verbose=False)
+    else:
+        model.fit(X_train, y_train)
+
+    cal_model = model
+    if use_early_stop and len(X_val) >= 20:
+        try:
+            calibrator = CalibratedClassifierCV(model, method="sigmoid", cv="prefit")
+            calibrator.fit(X_val, y_val)
+            cal_model = calibrator
+        except Exception:
+            pass
+
+    return cal_model
+
+
 def _train_lgbm(
     symbol: str,
     df: pd.DataFrame,
 ) -> tuple[Any, float, list[str], str]:
     """
-    Train a LightGBM classifier on price DataFrame ``df``, with:
-      • Early stopping (50 rounds) on a held-out calibration/validation set.
-      • Sigmoid calibration (Platt scaling) on the same holdout for reliable
-        probability estimates at inference time.
-      • 3-way temporal split: 60% train | 15% calib/early-stop | 25% OOS.
+    Train a walk-forward ensemble of LightGBM classifiers on price DataFrame ``df``.
+
+    Three sub-models are trained on temporal slices of the labeled data:
+      • Window 0 (full,   100%): long-term regime patterns
+      • Window 1 (medium,  75%): medium-term emphasis
+      • Window 2 (recent,  50%): current market regime focus
+
+    Each sub-model uses 3-way temporal split (60% train / 15% calib / 25% OOS),
+    early stopping, and sigmoid calibration.  Inference averages their probabilities.
 
     Returns
     -------
-    model         : calibrated LGBMClassifier (picklable)
-    oos_accuracy  : float  (0–1)  measured on the 25% OOS slice
+    model         : _EnsembleModel wrapping K calibrated sub-models (picklable)
+    oos_accuracy  : float  measured on the full-window 25% OOS slice
     feature_cols  : list[str]
-    last_bar_date : str  (ISO date of the last bar in ``df``)
+    last_bar_date : str  ISO date of the last bar in ``df``
     """
     try:
         import lightgbm as lgb
@@ -194,70 +318,38 @@ def _train_lgbm(
         raise ValueError(f"Too few labeled rows for {symbol}: {len(aligned)}")
 
     feat_cols = list(FEATURE_COLS)
+    n         = len(aligned)
 
-    # ── 3-way temporal split ──────────────────────────────────
-    # │ 60% LGBM train │ 15% early-stop + calib │ 25% OOS accuracy │
-    n = len(aligned)
-    n_lgbm  = int(n * 0.60)
-    n_calib = int(n * 0.15)
+    # ── Walk-forward ensemble ─────────────────────────────────────────────
+    # Train 3 sub-models on different temporal slices of the aligned data.
+    # Averaging their probabilities at inference time yields more robust
+    # uncertainty estimates than any single model.
+    sub_models: list[Any] = []
+    for frac in [1.0, 0.75, 0.50]:
+        n_win     = max(60, int(n * frac))
+        win_slice = aligned.iloc[-n_win:]
+        sub       = _train_single_window(feat_cols, win_slice, _LGB_PARAMS, TRAIN_RATIO)
+        if sub is not None:
+            sub_models.append(sub)
 
-    if n_lgbm < 40 or n_calib < 10:
-        # Scarce data fallback: simple 70 / 30 split, no early stopping
-        n_train = int(n * TRAIN_RATIO)
-        X_train = aligned.iloc[:n_train][feat_cols]
-        y_train = aligned.iloc[:n_train]["label"] + 1
-        X_val   = aligned.iloc[n_train:][feat_cols]
-        y_val   = aligned.iloc[n_train:]["label"] + 1
-        X_oos, y_oos = X_val, y_val
-        use_early_stop = False
-    else:
-        X_train = aligned.iloc[:n_lgbm][feat_cols]
-        y_train = aligned.iloc[:n_lgbm]["label"] + 1
-        X_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib][feat_cols]
-        y_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib]["label"] + 1
-        X_oos   = aligned.iloc[n_lgbm + n_calib:][feat_cols]
-        y_oos   = aligned.iloc[n_lgbm + n_calib:]["label"] + 1
-        use_early_stop = True
+    if not sub_models:
+        raise ValueError(f"No sub-models trained for {symbol}")
 
-    model = lgb.LGBMClassifier(**_LGB_PARAMS)
+    ensemble_model = _EnsembleModel(sub_models)
 
-    if use_early_stop:
-        try:
-            from lightgbm import early_stopping as _es, log_evaluation as _le
-            model.fit(
-                X_train, y_train,
-                eval_set=[(X_val, y_val)],
-                callbacks=[_es(50, verbose=False), _le(period=0)],
-            )
-        except Exception:
-            # Older LightGBM (< 4.0) fallback
-            model.fit(X_train, y_train,
-                      eval_set=[(X_val, y_val)],
-                      early_stopping_rounds=50,
-                      verbose=False)
-    else:
-        model.fit(X_train, y_train)
-
-    # ── Probability calibration ────────────────────────────────
-    # Sigmoid calibration makes confidence scores more trustworthy for the
-    # trading threshold gate.  Fit on the calibration holdout (not OOS).
-    cal_model = model  # default: uncalibrated
-    if use_early_stop and len(X_val) >= 20:
-        try:
-            from sklearn.calibration import CalibratedClassifierCV
-            calibrator = CalibratedClassifierCV(model, method="sigmoid", cv="prefit")
-            calibrator.fit(X_val, y_val)
-            cal_model = calibrator
-        except Exception as e:
-            _log.debug("_train_lgbm: calibration failed (%s) — using raw probas", e)
-
-    # Out-of-sample accuracy (measured on held-out 25% OOS slice)
+    # ── OOS accuracy on the full-window 25% held-out slice ────────────────
+    n_lgbm_full  = int(n * 0.60)
+    n_calib_full = int(n * 0.15)
+    X_oos = aligned.iloc[n_lgbm_full + n_calib_full:][feat_cols]
+    y_oos = aligned.iloc[n_lgbm_full + n_calib_full:]["label"] + 1
     oos_acc = 0.0
     if len(X_oos) > 0:
-        oos_acc = float((cal_model.predict(X_oos) == y_oos.values).mean())
+        oos_acc = float((ensemble_model.predict(X_oos) == y_oos.values).mean())
 
-    last_bar_date = str(df.index[-1].date()) if hasattr(df.index[-1], "date") else str(df.index[-1])[:10]
-    return cal_model, oos_acc, feat_cols, last_bar_date
+    last_bar_date = (
+        str(df.index[-1].date()) if hasattr(df.index[-1], "date") else str(df.index[-1])[:10]
+    )
+    return ensemble_model, oos_acc, feat_cols, last_bar_date
 
 
 def _is_stale(meta: dict, new_bar_count: int) -> tuple[bool, str]:
