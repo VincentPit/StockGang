@@ -132,6 +132,13 @@ class ScreenRow(BaseModel):
     causal_nodes: list[dict[str, Any]] = []
     data_scope:   Optional[dict[str, Any]] = None
     gate_checks:  list[dict[str, Any]] = []
+    # CN-market screening metrics (hot-stock filters + 主力 presence)
+    ret_20d:        float = 0.0   # 20-day return (hot-stock hard filter)
+    price_52w_pct:  float = 0.0   # 52-week price position 0→1 (near-peak guard)
+    dist_52w_high:  float = 0.0   # fraction below 52-week peak
+    vol_60d:        float = 0.0   # annualised 60-day volatility
+    limit_up_60d:   int   = 0     # 涨停 count last 60 days (主力 presence)
+    yang_ratio_60d: float = 0.0   # fraction of 阳线 candles last 60 days (阳多绿少)
 
 
 class ScreenResponse(BaseModel):

@@ -131,6 +131,13 @@ def _run_screener_sync(jid: str, req: dict) -> None:
                 "causal_nodes": r.get("causal_nodes", []),
                 "data_scope":   r.get("data_scope"),
                 "gate_checks":  r.get("gate_checks", []),
+                # CN-market metrics
+                "ret_20d":        round(r.get("ret_20d",        0.0), 6),
+                "price_52w_pct":  round(r.get("price_52w_pct",  0.0), 4),
+                "dist_52w_high":  round(r.get("dist_52w_high",  0.0), 4),
+                "vol_60d":        round(r.get("vol_60d",        0.0), 4),
+                "limit_up_60d":   int(r.get("limit_up_60d",     0)),
+                "yang_ratio_60d": round(r.get("yang_ratio_60d", 0.0), 4),
             })
 
         _update_job(jid, {
