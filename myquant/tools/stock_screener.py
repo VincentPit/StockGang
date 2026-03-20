@@ -97,19 +97,37 @@ def _fetch_and_score(sym, yf_tick, name, start_iso, end_iso, min_bars, n_score):
         lows    = df_s["Low"].values.astype(float)
         rets    = np.diff(closes) / closes[:-1]
         mid_idx = len(closes) // 2
+
+        # ── Hot-stock filter metrics ────────────────────────────────────────
+        # ret_20d: 20-day price change — used to detect recent surging stocks
+        ret_20d = float((closes[-1] / closes[-20] - 1) if len(closes) >= 20 else 0.0)
+        # price_52w_pct: where price sits in its 52-week high/low range (0=bottom, 1=top)
+        hi52 = float(np.max(closes[-252:])) if len(closes) >= 252 else float(np.max(closes))
+        lo52 = float(np.min(closes[-252:])) if len(closes) >= 252 else float(np.min(closes))
+        price_52w_pct = float((closes[-1] - lo52) / (hi52 - lo52 + 1e-10))
+        # dist_52w_high: fraction below 52-week peak (0=AT peak, 0.3=30% below)
+        dist_52w_high = float(max(0.0, (hi52 - closes[-1]) / (hi52 + 1e-10)))
+        # vol_60d: 60-day annualised daily return volatility (lower = more stable)
+        vol_60d = float(np.std(rets[-60:]) * np.sqrt(252)) if len(rets) >= 60 else float(np.std(rets) * np.sqrt(252))
+
         return {
-            "sym":        sym,
-            "yf":         yf_tick,
-            "name":       name,
-            "bars":       len(df_s),
-            "ret_1y":     (closes[-1] - closes[0]) / closes[0],
-            "ret_6m":     (closes[-1] - closes[mid_idx]) / closes[mid_idx],
-            "sharpe":     _sharpe(rets),
-            "max_dd":     _max_drawdown(closes),
-            "trend_pct":  _ma50_pct_above(closes),
-            "atr_pct":    _atr_pct(closes, highs, lows),
-            "autocorr":   _autocorr_lag1(rets),
-            "last_close": closes[-1],
+            "sym":           sym,
+            "yf":            yf_tick,
+            "name":          name,
+            "bars":          len(df_s),
+            "ret_1y":        (closes[-1] - closes[0]) / closes[0],
+            "ret_6m":        (closes[-1] - closes[mid_idx]) / closes[mid_idx],
+            "sharpe":        _sharpe(rets),
+            "max_dd":        _max_drawdown(closes),
+            "trend_pct":     _ma50_pct_above(closes),
+            "atr_pct":       _atr_pct(closes, highs, lows),
+            "autocorr":      _autocorr_lag1(rets),
+            "last_close":    closes[-1],
+            # Hot-stock guard metrics
+            "ret_20d":        ret_20d,
+            "price_52w_pct":  price_52w_pct,
+            "dist_52w_high":  dist_52w_high,
+            "vol_60d":        vol_60d,
             "data_scope": {
                 "start_date":  str(df_s.index[0])[:10],
                 "end_date":    str(df_s.index[-1])[:10],
@@ -189,7 +207,27 @@ def screen(
         if verbose:
             print("  No data retrieved — check internet connection.")
         return [], [], universe_size
+    # ── Hard filters: block hot stocks & near-peak stocks ──────────────────
+    # Rule 1: 20-day gain > 25% → recent surge, likely over-heated
+    # Rule 2: price in top 10% of 52-week range → near historical high, avoid
+    hot_excluded: list[str] = []
+    filtered: list[dict] = []
+    for r in results:
+        if r.get("ret_20d", 0.0) > 0.25:
+            hot_excluded.append(f"{r['sym']} (20d +{r['ret_20d']:.0%})")
+            continue
+        if r.get("price_52w_pct", 0.5) > 0.90:
+            hot_excluded.append(f"{r['sym']} (52w pos {r['price_52w_pct']:.0%})")
+            continue
+        filtered.append(r)
+    if verbose and hot_excluded:
+        print(f"  Hot-stock filter excluded {len(hot_excluded)}: {', '.join(hot_excluded[:8])}")
+    results = filtered
 
+    if not results:
+        if verbose:
+            print("  All candidates excluded by hot-stock filter.")
+        return [], [], universe_size
     # Normalise each metric to [0, 1] across the scored universe
     def _minmax(vals):
         lo, hi = min(vals), max(vals)
@@ -200,13 +238,31 @@ def screen(
     norm_autocorr = _minmax([r["autocorr"]  for r in results])
     norm_6m       = _minmax([r["ret_6m"]    for r in results])
     norm_dd       = _minmax([-r["max_dd"]   for r in results])
+    # New value/safety signals
+    norm_low_vol  = _minmax([-r.get("vol_60d",  0.02) for r in results])   # lower vol = higher score
+    norm_52w_dist = _minmax([r.get("dist_52w_high", 0) for r in results])  # further from peak = higher score
 
-    W_TREND, W_ATR, W_AUTOCORR, W_MOM6M, W_DD = 0.25, 0.20, 0.20, 0.20, 0.15
+    # Weights rebalanced to de-emphasise short-term momentum and reward
+    # value, stability, and distance from recent highs (per CN market advice):
+    #   TREND     0.20 (was 0.25) — still important but less dominant
+    #   ATR       0.10 (was 0.20) — keep, but quality > tradability
+    #   AUTOCORR  0.15 (was 0.20) — momentum still relevant, but dampened
+    #   MOM_6M    0.10 (was 0.20) — 6m momentum rewards hot stocks → cut in half
+    #   DD        0.20 (was 0.15) — stronger safety penalty
+    #   LOW_VOL   0.15 (NEW)      — reward low-volatility quality names
+    #   DIST_52W  0.10 (NEW)      — reward stocks far from 52-week high
+    W_TREND, W_ATR, W_AUTOCORR, W_MOM6M, W_DD, W_LOW_VOL, W_DIST_52W = (
+        0.20, 0.10, 0.15, 0.10, 0.20, 0.15, 0.10
+    )
     for i, r in enumerate(results):
-        nt, na, nac, n6, ndd = (
+        nt, na, nac, n6, ndd, nlv, n52 = (
             norm_trend[i], norm_atr[i], norm_autocorr[i], norm_6m[i], norm_dd[i],
+            norm_low_vol[i], norm_52w_dist[i],
         )
-        r["score"] = W_TREND * nt + W_ATR * na + W_AUTOCORR * nac + W_MOM6M * n6 + W_DD * ndd
+        r["score"] = (
+            W_TREND * nt + W_ATR * na + W_AUTOCORR * nac + W_MOM6M * n6
+            + W_DD * ndd + W_LOW_VOL * nlv + W_DIST_52W * n52
+        )
         # ── Causal trace: per-factor breakdown ───────────────────────────────
         r["causal_nodes"] = [
             {
@@ -264,6 +320,28 @@ def screen(
                 "direction":    "positive" if ndd >= 0.6 else "negative" if ndd < 0.4 else "neutral",
                 "percentile":   f"Top {max(1, int((1 - ndd) * 100))}%",
             },
+            {
+                "factor":       "vol_60d",
+                "label":        "60d Volatility",
+                "description":  f"Annualised 60d vol {r.get('vol_60d', 0):.1%} — {'stable/quality' if r.get('vol_60d', 0) < 0.20 else 'moderate' if r.get('vol_60d', 0) < 0.35 else 'high vol'}",
+                "raw_value":    round(r.get("vol_60d", 0), 6),
+                "norm_value":   round(nlv, 4),
+                "weight":       W_LOW_VOL,
+                "contribution": round(W_LOW_VOL * nlv, 4),
+                "direction":    "positive" if nlv >= 0.6 else "negative" if nlv < 0.4 else "neutral",
+                "percentile":   f"Top {max(1, int((1 - nlv) * 100))}%",
+            },
+            {
+                "factor":       "dist_52w_high",
+                "label":        "Distance from 52w High",
+                "description":  f"{r.get('dist_52w_high', 0):.1%} below 52-week peak — {'deep pullback' if r.get('dist_52w_high', 0) > 0.25 else 'moderate pullback' if r.get('dist_52w_high', 0) > 0.10 else 'near peak'}",
+                "raw_value":    round(r.get("dist_52w_high", 0), 6),
+                "norm_value":   round(n52, 4),
+                "weight":       W_DIST_52W,
+                "contribution": round(W_DIST_52W * n52, 4),
+                "direction":    "positive" if n52 >= 0.6 else "negative" if n52 < 0.4 else "neutral",
+                "percentile":   f"Top {max(1, int((1 - n52) * 100))}%",
+            },
         ]
         r["gate_checks"] = [
             {
@@ -273,7 +351,23 @@ def screen(
                 "actual":    r["bars"],
                 "passed":    True,
                 "note":      f"{r['bars']} bars ≥ {min_bars} required",
-            }
+            },
+            {
+                "check":     "hot_stock",
+                "label":     "Not a hot stock (20d gain ≤ 25%)",
+                "threshold": 0.25,
+                "actual":    round(r.get("ret_20d", 0), 4),
+                "passed":    True,
+                "note":      f"20d gain {r.get('ret_20d', 0):.1%} passed hard filter",
+            },
+            {
+                "check":     "near_52w_high",
+                "label":     "Not near 52-week high (≤ 90%)",
+                "threshold": 0.90,
+                "actual":    round(r.get("price_52w_pct", 0.5), 4),
+                "passed":    True,
+                "note":      f"52w position {r.get('price_52w_pct', 0.5):.0%} passed hard filter",
+            },
         ]
 
     results.sort(key=lambda r: r["score"], reverse=True)

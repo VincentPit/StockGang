@@ -38,6 +38,7 @@ class RiskGate:
         5. Position limit check  — max single position % of NAV
         6. Sector exposure check — max sector % of NAV
         7. VaR check             — 1-day 95% parametric VaR must stay under limit
+        8. Hot-stock guard       — blocks BUY entries for recent-surge flagged symbols
     """
 
     def __init__(
@@ -69,6 +70,9 @@ class RiskGate:
         self._default_vol:   float = default_daily_vol
         self._vol_estimates: dict[str, float] = {}   # per-symbol daily vol, injected externally
 
+        # Hot-stock exclusion list (refreshed after each morning screen)
+        self._hot_symbols: frozenset[str] = frozenset()
+
     # ── Public ────────────────────────────────────────────────
 
     def set_sector_map(self, sector_map: dict[str, str]) -> None:
@@ -86,6 +90,18 @@ class RiskGate:
             estimates: Mapping of symbol → daily vol fraction (e.g. 0.018 = 1.8%).
         """
         self._vol_estimates.update(estimates)
+
+    def set_hot_symbols(self, symbols: set[str]) -> None:
+        """
+        Update the hot-stock exclusion list.
+
+        Any symbol in this set will be blocked from new BUY entries for the
+        current session.  Exits (SELL / CLOSE_LONG / CLOSE_SHORT) are always
+        permitted to allow orderly unwinding.  Call once per day after the
+        morning screening pass with symbols whose 20-day gain exceeds the
+        hot-stock threshold or that are trading near their 52-week high.
+        """
+        self._hot_symbols = frozenset(s.upper() for s in symbols)
 
     def evaluate(
         self,
@@ -110,6 +126,7 @@ class RiskGate:
             self._check_position_limit,
             self._check_sector_limit,
             self._check_var,          # 7. VaR check
+            self._check_hot_stock,    # 8. Hot-stock guard
         ]
         final = RiskDecision(approved=True)
         for check in checks:
@@ -376,6 +393,27 @@ class RiskGate:
                     f"VaR limit exceeded: {var_pct:.1%} > {self._var_limit_pct:.1%} of NAV "
                     f"(portfolio={portfolio_var:,.0f}, proposed={proposed_var:,.0f})"
                 ),
+            )
+        return RiskDecision(approved=True)
+
+    def _check_hot_stock(self, signal: Signal) -> RiskDecision:
+        """
+        Layer 8 — Hot-stock guard.
+
+        Blocks new BUY entries for symbols on the hot-stock exclusion list
+        (symbols flagged by the screener for a 20-day gain above the surge
+        threshold, or for trading near their 52-week high).  Exits are always
+        permitted to allow orderly unwinding.
+        """
+        is_exit = signal.signal_type in (
+            SignalType.SELL, SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT
+        )
+        if is_exit:
+            return RiskDecision(approved=True)
+        if signal.symbol.upper() in self._hot_symbols:
+            return RiskDecision(
+                approved=False,
+                reason=f"{signal.symbol} is on the hot-stock exclusion list (recent price surge)",
             )
         return RiskDecision(approved=True)
 

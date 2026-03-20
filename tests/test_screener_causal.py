@@ -43,6 +43,13 @@ def _make_closes(n: int = 260, trend: str = "up") -> np.ndarray:
     """Generate synthetic close prices."""
     if trend == "up":
         return 100.0 + np.arange(n, dtype=float) * 0.2
+    elif trend == "gradual_up":
+        # Steady climb to a peak at 70% of history, then minor pullback.
+        # Final price is ~15% below the 52w high so it passes the near-52w-high filter.
+        peak_idx = int(n * 0.70)
+        rise  = 100.0 + np.arange(peak_idx, dtype=float) * 0.30
+        fall  = rise[-1] - np.arange(n - peak_idx, dtype=float) * 0.10
+        return np.concatenate([rise, fall])
     elif trend == "down":
         return 100.0 - np.arange(n, dtype=float) * 0.2
     else:  # flat
@@ -216,7 +223,7 @@ class TestFetchAndScore:
 class TestScreenerCausalNodes:
     """Test screen() with mocked yfinance and universe."""
 
-    FACTORS = ["trend_pct", "atr_pct", "autocorr", "ret_6m", "max_dd"]
+    FACTORS = ["trend_pct", "atr_pct", "autocorr", "ret_6m", "max_dd", "vol_60d", "dist_52w_high"]
 
     @pytest.fixture(autouse=True)
     def _patch_universe_and_yf(self, monkeypatch):
@@ -248,7 +255,7 @@ class TestScreenerCausalNodes:
         for r in results:
             assert "causal_nodes" in r
 
-    def test_exactly_five_factors(self):
+    def test_exactly_seven_factors(self):
         from myquant.tools.stock_screener import screen
         _, results, _ = screen(top_n=2, min_bars=50, verbose=False)
         for r in results:
@@ -423,7 +430,9 @@ class TestDataScopeFromScreener:
             "myquant.data.fetchers.universe_fetcher.fetch_universe",
             lambda indices=None: fake_universe,
         )
-        df = _make_ohlcv_df(260, "up")
+        # "gradual_up": peaks at 70% of history then minor pullback — passes hard filters
+        # (ret_20d is slightly negative, price_52w_pct ≈ 0.85 < 0.90 threshold)
+        df = _make_ohlcv_df(260, "gradual_up")
         mock_ticker = MagicMock()
         mock_ticker.history.return_value = df
         monkeypatch.setattr("yfinance.Ticker", lambda _: mock_ticker)

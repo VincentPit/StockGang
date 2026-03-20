@@ -74,7 +74,7 @@ class Settings:
 
     # ── Risk ─────────────────────────────────────────────────
     MAX_POSITION_PCT: float = float(_get("MAX_POSITION_PCT", "0.20"))
-    MAX_SECTOR_PCT: float = float(_get("MAX_SECTOR_PCT", "0.40"))
+    MAX_SECTOR_PCT: float = float(_get("MAX_SECTOR_PCT", "0.25"))
     DAILY_DRAWDOWN_LIMIT: float = float(_get("DAILY_DRAWDOWN_LIMIT", "-0.03"))
     VAR_LIMIT: float = float(_get("VAR_LIMIT", "0.02"))
     MAX_ORDERS_PER_MINUTE: int = int(_get("MAX_ORDERS_PER_MINUTE", "10"))

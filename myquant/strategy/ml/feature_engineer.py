@@ -2,11 +2,11 @@
 Feature Engineer — converts a list of Bar objects into an ML-ready DataFrame.
 
 Features produced:
-  Momentum    : ret_1d, ret_5d, ret_10d, ret_20d
-  Volatility  : vol_5d, vol_20d, atr_14
+  Momentum    : ret_1d, ret_60d, ret_120d, ret_20d   (gradual — no short-term surge signals)
+  Volatility  : vol_20d, vol_120d, atr_14
   Oscillators : rsi_14 (Wilder EWM), macd_hist, stoch_k/d, wr_14, cci_20
-  Mean-revert : bb_pos, bb_width, keltner_pos
-  Volume      : vol_ratio, cmf_20, vol_trend
+  Mean-revert : bb_pos, bb_width, keltner_pos, dist_52w_high
+  Volume      : vol_ratio, cmf_20
   Range       : price_52w_pos, atr_14
   Regime      : vol_regime, trend_strength, above_ma50, ma_spread, ma50_slope
   Microstr.   : close_loc, gap_pct
@@ -26,9 +26,14 @@ from myquant.models.bar import Bar
 
 # Columns used as model input features (order matters — don't change without retraining)
 FEATURE_COLS: list[str] = [
-    # ── Core momentum & volatility ───────────────────────────────────────
-    "ret_1d", "ret_5d", "ret_10d", "ret_20d",
-    "vol_5d", "vol_20d",
+    # ── Gradual momentum (60d/120d) — punishes short-term hot surges ────
+    # ret_5d / ret_10d removed: they bias the model toward recently surging (hot)
+    # stocks. Replaced with slower momentum that favours steady climbers.
+    "ret_1d", "ret_60d", "ret_120d", "ret_20d",
+    # ── Volatility: long-window stability replaces 5d noise ─────────────
+    # dist_52w_high (fraction below 52-week peak) rewards beaten-down stocks;
+    # vol_120d captures long-term stability, favouring quality low-vol names.
+    "dist_52w_high", "vol_20d", "vol_120d",
     # ── Oscillators ──────────────────────────────────────────────────────
     "rsi_14",
     "macd_hist", "macd_signal_ratio",
@@ -38,15 +43,14 @@ FEATURE_COLS: list[str] = [
     "atr_14",
     "wr_14", "cci_20",        # Williams %R (14-period) + Commodity Channel Index (20-period)
     "price_52w_pos",
-    # ── NEW: regime & microstructure features ────────────────────────────
+    # ── Regime & microstructure features ─────────────────────────────────
     "vol_regime",      # rolling vol percentile — where is current vol vs history
     "trend_strength",  # |ret_20d| / vol_20d — signal-to-noise of trend
     "close_loc",       # where close sits in day's high/low range
     "gap_pct",         # overnight gap (open vs prev close)
-    "vol_trend",       # volume momentum (5d avg / 20d avg)
     "above_ma50",      # binary: is price above its own 50-day MA?
     "ma_spread",       # (MA50 - MA200) / MA200 — trend direction & strength
-    # ── NEW: momentum breadth & flow ─────────────────────────────────────────
+    # ── Momentum breadth & flow ───────────────────────────────────────────
     "stoch_k",         # Stochastic %K (14-period): position in recent high/low range
     "stoch_d",         # Stochastic %D (3-period SMA of %K): slower signal line
     "cmf_20",          # Chaikin Money Flow (20-period): volume-weighted directional pressure
@@ -96,14 +100,20 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     ret    = close.pct_change()
 
     # ── Momentum ─────────────────────────────────────────────
-    df["ret_1d"]  = ret
-    df["ret_5d"]  = close.pct_change(5)
-    df["ret_10d"] = close.pct_change(10)
-    df["ret_20d"] = close.pct_change(20)
+    # Using 60d/120d instead of 5d/10d: rewards gradual uptrends, not hot surges.
+    # A stock up 5% in 5 days (hot) looks the same as a stock up 50% in 60 days
+    # (steady climber) when viewed through a 60d lens — but the model can
+    # distinguish them via vol_20d and dist_52w_high.
+    df["ret_1d"]   = ret
+    df["ret_60d"]  = close.pct_change(60)
+    df["ret_120d"] = close.pct_change(120)
+    df["ret_20d"]  = close.pct_change(20)
 
     # ── Volatility ───────────────────────────────────────────
-    df["vol_5d"]  = ret.rolling(5).std()
-    df["vol_20d"] = ret.rolling(20).std()
+    # vol_120d: long-term stability signal — low value = quality, low-vol stock
+    # (min_periods=60 so it becomes valid before the full 120-bar warm-up)
+    df["vol_20d"]  = ret.rolling(20).std()
+    df["vol_120d"] = ret.rolling(120, min_periods=60).std()
 
     # ATR (normalized by close)
     tr = pd.concat(
@@ -174,6 +184,13 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     high_52w = high.rolling(252, min_periods=20).max()
     low_52w  = low.rolling(252,  min_periods=20).min()
     df["price_52w_pos"] = (close - low_52w) / (high_52w - low_52w + 1e-10)
+
+    # ── Distance from 52-week high ────────────────────────────────────────
+    # Fraction below the 52-week peak: 0.0 = AT the 52w high (avoid — likely hot),
+    # 0.30 = 30% below the 52w high (potential mean-reversion candidate).
+    # Clipped at 0.80 to cap extreme outliers from deeply distressed stocks.
+    df["dist_52w_high"] = ((high_52w - close) / (high_52w + 1e-10)).clip(0.0, 0.80)
+
     # ── Vol regime: rolling percentile of 20d vol over 252-bar window ──
     # High vol_regime (near 1.0) = unusually volatile → mean-reverting environment
     # Low vol_regime (near 0.0)  = calm market → trending environment
@@ -189,10 +206,6 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
 
     # ── Overnight gap: open vs previous close ───────────────────────────
     df["gap_pct"] = (df["open"] / close.shift(1) - 1).clip(-0.10, 0.10)
-
-    # ── Volume trend: 5d avg vs 20d avg ─────────────────────────────────
-    # > 1.0 = recent volume surge; < 1.0 = volume drying up
-    df["vol_trend"] = volume.rolling(5).mean() / (volume.rolling(20).mean() + 1e-10)
 
     # ── MA regime: self-contained trend signals ──────────────────────────
     # These let the model learn regime-conditional behaviour without look-ahead:

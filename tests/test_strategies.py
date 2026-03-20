@@ -145,7 +145,7 @@ class TestFeatureEngineer:
         assert df[FEATURE_COLS].isna().sum().sum() == 0
 
     def test_feature_count_matches(self):
-        """FEATURE_COLS should have exactly 28 entries (26 core + 2 replacing roc_10/roc_20)."""
+        """FEATURE_COLS should have exactly 28 entries (CN anti-hot-stock refactor: ret_60d/ret_120d/dist_52w_high/vol_120d)."""
         assert len(FEATURE_COLS) == 28
 
     def test_wr_14_range(self):
@@ -227,6 +227,27 @@ class TestFeatureEngineer:
         diff = (df["wr_14"] + df["stoch_k"]).sub(100).abs()
         assert diff.max() < 1e-6, "wr_14 and stoch_k should sum to 100"
 
+    def test_ret_60d_finite(self):
+        """ret_60d (60-day gradual momentum) must be finite in all output rows."""
+        df = bars_to_features(self.BARS)
+        assert np.isfinite(df["ret_60d"]).all()
+
+    def test_ret_120d_finite(self):
+        """ret_120d (120-day gradual momentum) must be finite in all output rows."""
+        df = bars_to_features(self.BARS)
+        assert np.isfinite(df["ret_120d"]).all()
+
+    def test_dist_52w_high_range(self):
+        """dist_52w_high (fraction below 52-week peak) must be in [0, 0.80] after clipping."""
+        df = bars_to_features(self.BARS)
+        assert df["dist_52w_high"].min() >= -1e-9
+        assert df["dist_52w_high"].max() <=  0.80 + 1e-9
+
+    def test_vol_120d_non_negative(self):
+        """vol_120d (120-day return std) must be non-negative."""
+        df = bars_to_features(self.BARS)
+        assert (df["vol_120d"] >= 0).all()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TestLGBMEnsemble — integration smoke-test for the walk-forward ensemble
@@ -289,3 +310,75 @@ class TestLGBMEnsemble:
 
         ens = s._ensemble.get(self.SYMBOL, [])
         assert len(ens) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestRiskGateHotStock — Layer 8 hot-stock guard
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestRiskGateHotStock:
+    """Tests for RiskGate Layer 8: hot-stock exclusion list."""
+
+    def _gate(self):
+        from myquant.risk.risk_gate import RiskGate
+        return RiskGate(
+            nav_getter=lambda: 1_000_000.0,
+            positions_getter=lambda: {},
+        )
+
+    def _buy_signal(self, symbol: str = "SH600519"):
+        from myquant.models.signal import Signal, SignalType
+        return Signal(
+            strategy_id="test",
+            symbol=symbol,
+            signal_type=SignalType.BUY,
+            price=100.0,
+            quantity=100,
+            ts=datetime(2024, 6, 1, 10, 0),
+        )
+
+    def _sell_signal(self, symbol: str = "SH600519"):
+        from myquant.models.signal import Signal, SignalType
+        return Signal(
+            strategy_id="test",
+            symbol=symbol,
+            signal_type=SignalType.SELL,
+            price=100.0,
+            quantity=100,
+            ts=datetime(2024, 6, 1, 10, 0),
+        )
+
+    def test_hot_stock_buy_rejected(self):
+        """BUY signal for a hot-stock-listed symbol must be rejected."""
+        gate = self._gate()
+        gate.set_hot_symbols({"SH600519"})
+        decision = gate._check_hot_stock(self._buy_signal("SH600519"))
+        assert not decision.approved
+        assert "hot-stock" in decision.reason.lower()
+
+    def test_hot_stock_sell_allowed(self):
+        """SELL (exit) signal for a hot-stock-listed symbol must be approved."""
+        gate = self._gate()
+        gate.set_hot_symbols({"SH600519"})
+        decision = gate._check_hot_stock(self._sell_signal("SH600519"))
+        assert decision.approved
+
+    def test_unlisted_symbol_approved(self):
+        """BUY signal for a symbol NOT on the hot list must be approved."""
+        gate = self._gate()
+        gate.set_hot_symbols({"SH600000"})
+        decision = gate._check_hot_stock(self._buy_signal("SH600519"))
+        assert decision.approved
+
+    def test_empty_hot_list_all_pass(self):
+        """With an empty hot list, all BUY signals should pass Layer 8."""
+        gate = self._gate()
+        decision = gate._check_hot_stock(self._buy_signal("SH600519"))
+        assert decision.approved
+
+    def test_set_hot_symbols_case_insensitive(self):
+        """set_hot_symbols normalises to upper-case; matching is case-insensitive."""
+        gate = self._gate()
+        gate.set_hot_symbols({"sh600519"})  # lower-case input
+        decision = gate._check_hot_stock(self._buy_signal("SH600519"))
+        assert not decision.approved
