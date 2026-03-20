@@ -110,6 +110,18 @@ def _fetch_and_score(sym, yf_tick, name, start_iso, end_iso, min_bars, n_score):
         # vol_60d: 60-day annualised daily return volatility (lower = more stable)
         vol_60d = float(np.std(rets[-60:]) * np.sqrt(252)) if len(rets) >= 60 else float(np.std(rets) * np.sqrt(252))
 
+        # limit_up_60d: number of 涨停 days (≥9.5% daily gain) in last 60 bars
+        # Non-zero = institutional presence (主力) confirmed; zero = stay away
+        rets_60       = rets[-60:] if len(rets) >= 60 else rets
+        limit_up_60d  = int((rets_60 >= 0.095).sum())
+
+        # yang_ratio_60d: fraction of 阳线 (close > open) candles in last 60 bars
+        # 阳多绿少 pattern: strong stocks have big up-candles and small down-candles
+        opens_60       = df_s["Open"].values.astype(float)[-60:]
+        closes_60      = closes[-60:]
+        n60            = len(closes_60)
+        yang_ratio_60d = float((closes_60 > opens_60).sum() / n60) if n60 >= 20 else 0.5
+
         return {
             "sym":           sym,
             "yf":            yf_tick,
@@ -128,6 +140,9 @@ def _fetch_and_score(sym, yf_tick, name, start_iso, end_iso, min_bars, n_score):
             "price_52w_pct":  price_52w_pct,
             "dist_52w_high":  dist_52w_high,
             "vol_60d":        vol_60d,
+            # CN-rule 1 metrics
+            "limit_up_60d":   limit_up_60d,
+            "yang_ratio_60d": yang_ratio_60d,
             "data_scope": {
                 "start_date":  str(df_s.index[0])[:10],
                 "end_date":    str(df_s.index[-1])[:10],
@@ -228,6 +243,24 @@ def screen(
         if verbose:
             print("  All candidates excluded by hot-stock filter.")
         return [], [], universe_size
+
+    # ── Hard filter: must have had at least one 涨停 in last 60 days ──────────────
+    # Per CN rule 1: if no 涨停 (≥9.5% day), no 主力 activity — don’t touch it.
+    no_player: list[str] = []
+    with_player: list[dict] = []
+    for r in results:
+        if r.get("limit_up_60d", 0) == 0:
+            no_player.append(f"{r['sym']} (0 limit-ups/60d)")
+        else:
+            with_player.append(r)
+    if verbose and no_player:
+        print(f"  No-主力 filter excluded {len(no_player)}: {', '.join(no_player[:6])}")
+    results = with_player
+
+    if not results:
+        if verbose:
+            print("  All candidates excluded by no-主力 filter.")
+        return [], [], universe_size
     # Normalise each metric to [0, 1] across the scored universe
     def _minmax(vals):
         lo, hi = min(vals), max(vals)
@@ -241,27 +274,29 @@ def screen(
     # New value/safety signals
     norm_low_vol  = _minmax([-r.get("vol_60d",  0.02) for r in results])   # lower vol = higher score
     norm_52w_dist = _minmax([r.get("dist_52w_high", 0) for r in results])  # further from peak = higher score
+    norm_yang     = _minmax([r.get("yang_ratio_60d", 0.5) for r in results])  # more 阳线 = higher score
 
     # Weights rebalanced to de-emphasise short-term momentum and reward
     # value, stability, and distance from recent highs (per CN market advice):
     #   TREND     0.20 (was 0.25) — still important but less dominant
     #   ATR       0.10 (was 0.20) — keep, but quality > tradability
-    #   AUTOCORR  0.15 (was 0.20) — momentum still relevant, but dampened
-    #   MOM_6M    0.10 (was 0.20) — 6m momentum rewards hot stocks → cut in half
+    #   AUTOCORR  0.10 (was 0.20) — dampened; yang_ratio captures same info
+    #   MOM_6M    0.05 (was 0.20) — 6m momentum rewards hot stocks → minimal weight
     #   DD        0.20 (was 0.15) — stronger safety penalty
     #   LOW_VOL   0.15 (NEW)      — reward low-volatility quality names
     #   DIST_52W  0.10 (NEW)      — reward stocks far from 52-week high
-    W_TREND, W_ATR, W_AUTOCORR, W_MOM6M, W_DD, W_LOW_VOL, W_DIST_52W = (
-        0.20, 0.10, 0.15, 0.10, 0.20, 0.15, 0.10
+    #   YANG      0.10 (NEW)      — 阳多绿少 candle structure (阳线 fraction)
+    W_TREND, W_ATR, W_AUTOCORR, W_MOM6M, W_DD, W_LOW_VOL, W_DIST_52W, W_YANG = (
+        0.20, 0.10, 0.10, 0.05, 0.20, 0.15, 0.10, 0.10
     )
     for i, r in enumerate(results):
-        nt, na, nac, n6, ndd, nlv, n52 = (
+        nt, na, nac, n6, ndd, nlv, n52, nyang = (
             norm_trend[i], norm_atr[i], norm_autocorr[i], norm_6m[i], norm_dd[i],
-            norm_low_vol[i], norm_52w_dist[i],
+            norm_low_vol[i], norm_52w_dist[i], norm_yang[i],
         )
         r["score"] = (
             W_TREND * nt + W_ATR * na + W_AUTOCORR * nac + W_MOM6M * n6
-            + W_DD * ndd + W_LOW_VOL * nlv + W_DIST_52W * n52
+            + W_DD * ndd + W_LOW_VOL * nlv + W_DIST_52W * n52 + W_YANG * nyang
         )
         # ── Causal trace: per-factor breakdown ───────────────────────────────
         r["causal_nodes"] = [
@@ -342,6 +377,17 @@ def screen(
                 "direction":    "positive" if n52 >= 0.6 else "negative" if n52 < 0.4 else "neutral",
                 "percentile":   f"Top {max(1, int((1 - n52) * 100))}%",
             },
+            {
+                "factor":       "yang_ratio_60d",
+                "label":        "阳多绿少 Candle Structure",
+                "description":  f"{r.get('yang_ratio_60d', 0.5):.0%} of last 60 candles are 阳线 (close>open) — {'strong structure' if r.get('yang_ratio_60d', 0.5) > 0.55 else 'weak structure' if r.get('yang_ratio_60d', 0.5) < 0.45 else 'neutral'}",
+                "raw_value":    round(r.get("yang_ratio_60d", 0.5), 4),
+                "norm_value":   round(nyang, 4),
+                "weight":       W_YANG,
+                "contribution": round(W_YANG * nyang, 4),
+                "direction":    "positive" if nyang >= 0.6 else "negative" if nyang < 0.4 else "neutral",
+                "percentile":   f"Top {max(1, int((1 - nyang) * 100))}%",
+            },
         ]
         r["gate_checks"] = [
             {
@@ -367,6 +413,14 @@ def screen(
                 "actual":    round(r.get("price_52w_pct", 0.5), 4),
                 "passed":    True,
                 "note":      f"52w position {r.get('price_52w_pct', 0.5):.0%} passed hard filter",
+            },
+            {
+                "check":     "has_limit_up",
+                "label":     "Has 涨停 in last 60 days (主力 present)",
+                "threshold": 1,
+                "actual":    r.get("limit_up_60d", 0),
+                "passed":    True,
+                "note":      f"{r.get('limit_up_60d', 0)} limit-up day(s) in last 60 bars",
             },
         ]
 

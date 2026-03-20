@@ -145,7 +145,7 @@ class TestFeatureEngineer:
         assert df[FEATURE_COLS].isna().sum().sum() == 0
 
     def test_feature_count_matches(self):
-        """FEATURE_COLS should have exactly 28 entries (CN anti-hot-stock refactor: ret_60d/ret_120d/dist_52w_high/vol_120d)."""
+        """FEATURE_COLS should have exactly 28 entries (CN rules 1-4: recent_limit_up/yang_ratio/candle_strength)."""
         assert len(FEATURE_COLS) == 28
 
     def test_wr_14_range(self):
@@ -172,18 +172,17 @@ class TestFeatureEngineer:
         assert df["stoch_d"].min() >= 0.0
         assert df["stoch_d"].max() <= 100.0
 
-    def test_cmf_range(self):
-        """Chaikin Money Flow must be in [-1, +1]."""
+    def test_candle_strength_clipped(self):
+        """candle_strength (avg yang-body minus avg yin-body / close) must be in [-0.05, 0.05]."""
         df = bars_to_features(self.BARS)
-        assert df["cmf_20"].min() >= -1.0 - 1e-9
-        assert df["cmf_20"].max() <=  1.0 + 1e-9
+        assert df["candle_strength"].min() >= -0.05 - 1e-9
+        assert df["candle_strength"].max() <=  0.05 + 1e-9
 
-    def test_keltner_pos_roughly_bounded(self):
-        """keltner_pos is typically near [0, 1] but can exceed bounds during breakouts.
-        We just verify it's computed and finite."""
+    def test_yang_ratio_range(self):
+        """yang_ratio (fraction of 阳线 candles in last 60d) must be in [0, 1]."""
         df = bars_to_features(self.BARS)
-        assert df["keltner_pos"].notna().all()
-        assert np.isfinite(df["keltner_pos"]).all()
+        assert df["yang_ratio"].min() >= 0.0 - 1e-9
+        assert df["yang_ratio"].max() <=  1.0 + 1e-9
 
     def test_ma50_slope_clipped(self):
         """ma50_slope must be within [-0.05, 0.05] after clipping."""
@@ -247,6 +246,33 @@ class TestFeatureEngineer:
         """vol_120d (120-day return std) must be non-negative."""
         df = bars_to_features(self.BARS)
         assert (df["vol_120d"] >= 0).all()
+
+    def test_recent_limit_up_range(self):
+        """recent_limit_up (fraction of limit-up days in 60d) must be in [0, 1]."""
+        df = bars_to_features(self.BARS)
+        assert df["recent_limit_up"].min() >= -1e-9
+        assert df["recent_limit_up"].max() <=  1.0 + 1e-9
+
+    def test_yang_ratio_uptrend_above_half(self):
+        """In a sustained uptrend bars, yang_ratio should exceed 0.50 (more up than down candles)."""
+        import random
+        random.seed(42)
+        np.random.seed(42)
+        # Build strongly trending bars where open < close on most days
+        base = 100.0
+        bars = []
+        from myquant.models.bar import Bar, BarInterval
+        from datetime import datetime, timedelta
+        for i in range(300):
+            o = base + i * 0.15
+            c = o + abs(np.random.normal(0.3, 0.05))  # close always above open
+            bars.append(Bar(
+                symbol="X", ts=datetime(2023, 1, 1) + timedelta(days=i),
+                open=o, high=c * 1.005, low=o * 0.995, close=c, volume=1_000_000,
+                interval=BarInterval.D1,
+            ))
+        df = bars_to_features(bars)
+        assert df["yang_ratio"].iloc[-1] > 0.5, "Uptrend bars should have yang_ratio > 0.5"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -381,4 +407,77 @@ class TestRiskGateHotStock:
         gate = self._gate()
         gate.set_hot_symbols({"sh600519"})  # lower-case input
         decision = gate._check_hot_stock(self._buy_signal("SH600519"))
+        assert not decision.approved
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestRiskGateBelowMA20 — Layer 9 MA20 life-line check
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestRiskGateBelowMA20:
+    """Tests for RiskGate Layer 9: MA20 life-line entry block."""
+
+    def _gate(self):
+        from myquant.risk.risk_gate import RiskGate
+        return RiskGate(
+            nav_getter=lambda: 1_000_000.0,
+            positions_getter=lambda: {},
+        )
+
+    def _buy(self, symbol: str = "SH600519", price: float = 100.0):
+        from myquant.models.signal import Signal, SignalType
+        return Signal(
+            strategy_id="test",
+            symbol=symbol,
+            signal_type=SignalType.BUY,
+            price=price,
+            quantity=100,
+            ts=datetime(2024, 6, 1, 10, 0),
+        )
+
+    def _sell(self, symbol: str = "SH600519", price: float = 100.0):
+        from myquant.models.signal import Signal, SignalType
+        return Signal(
+            strategy_id="test",
+            symbol=symbol,
+            signal_type=SignalType.SELL,
+            price=price,
+            quantity=100,
+            ts=datetime(2024, 6, 1, 10, 0),
+        )
+
+    def test_buy_below_ma20_rejected(self):
+        """BUY when price < MA20 must be rejected (life-line rule)."""
+        gate = self._gate()
+        gate.set_ma20_map({"SH600519": 110.0})   # MA20=110, price=100 → below
+        decision = gate._check_below_ma20(self._buy("SH600519", price=100.0))
+        assert not decision.approved
+        assert "MA20" in decision.reason or "ma20" in decision.reason.lower()
+
+    def test_buy_above_ma20_approved(self):
+        """BUY when price > MA20 must be approved."""
+        gate = self._gate()
+        gate.set_ma20_map({"SH600519": 90.0})    # MA20=90, price=100 → above
+        decision = gate._check_below_ma20(self._buy("SH600519", price=100.0))
+        assert decision.approved
+
+    def test_sell_below_ma20_always_approved(self):
+        """SELL (exit) is always approved regardless of MA20 position."""
+        gate = self._gate()
+        gate.set_ma20_map({"SH600519": 150.0})   # price well below MA20
+        decision = gate._check_below_ma20(self._sell("SH600519", price=100.0))
+        assert decision.approved
+
+    def test_no_ma20_data_approved(self):
+        """If symbol has no MA20 data injected, BUY must still be approved (no block)."""
+        gate = self._gate()
+        # Empty map — no data for this symbol
+        decision = gate._check_below_ma20(self._buy("SH600519", price=100.0))
+        assert decision.approved
+
+    def test_set_ma20_map_case_insensitive(self):
+        """set_ma20_map normalises to upper-case; lookup is case-insensitive."""
+        gate = self._gate()
+        gate.set_ma20_map({"sh600519": 110.0})   # lower-case input
+        decision = gate._check_below_ma20(self._buy("SH600519", price=100.0))
         assert not decision.approved

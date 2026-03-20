@@ -5,11 +5,11 @@ Features produced:
   Momentum    : ret_1d, ret_60d, ret_120d, ret_20d   (gradual — no short-term surge signals)
   Volatility  : vol_20d, vol_120d, atr_14
   Oscillators : rsi_14 (Wilder EWM), macd_hist, stoch_k/d, wr_14, cci_20
-  Mean-revert : bb_pos, bb_width, keltner_pos, dist_52w_high
-  Volume      : vol_ratio, cmf_20
+  Mean-revert : bb_pos, bb_width, dist_52w_high
+  Volume      : vol_ratio, candle_strength
   Range       : price_52w_pos, atr_14
   Regime      : vol_regime, trend_strength, above_ma50, ma_spread, ma50_slope
-  Microstr.   : close_loc, gap_pct
+  Microstr.   : close_loc, yang_ratio, recent_limit_up
 
 Labels (for supervised training):
   make_labels() → ternary classification: 1=BUY, 0=HOLD, -1=SELL
@@ -44,18 +44,25 @@ FEATURE_COLS: list[str] = [
     "wr_14", "cci_20",        # Williams %R (14-period) + Commodity Channel Index (20-period)
     "price_52w_pos",
     # ── Regime & microstructure features ─────────────────────────────────
-    "vol_regime",      # rolling vol percentile — where is current vol vs history
-    "trend_strength",  # |ret_20d| / vol_20d — signal-to-noise of trend
-    "close_loc",       # where close sits in day's high/low range
-    "gap_pct",         # overnight gap (open vs prev close)
-    "above_ma50",      # binary: is price above its own 50-day MA?
-    "ma_spread",       # (MA50 - MA200) / MA200 — trend direction & strength
-    # ── Momentum breadth & flow ───────────────────────────────────────────
-    "stoch_k",         # Stochastic %K (14-period): position in recent high/low range
-    "stoch_d",         # Stochastic %D (3-period SMA of %K): slower signal line
-    "cmf_20",          # Chaikin Money Flow (20-period): volume-weighted directional pressure
-    "keltner_pos",     # Position in Keltner channel (ATR-based, complements bb_pos)
-    "ma50_slope",      # 5-bar rate of change of MA50 — trend acceleration signal
+    "vol_regime",         # rolling vol percentile — where is current vol vs history
+    "trend_strength",     # |ret_20d| / vol_20d — signal-to-noise of trend
+    "close_loc",          # where close sits in day's high/low range
+    # ── CN-market regime features (rule 1 / rule 4) ───────────────────────
+    # recent_limit_up: fraction of last 60d with ≥9.5% daily gain — non-zero
+    #   confirms 主力 (institutional) presence; zero = avoid (no big-money action)
+    # yang_ratio: fraction of 阳线 (close>open) in last 60d — 阳多绿少 strong-stock
+    #   pattern; >0.55 = structurally bullish candle structure
+    # candle_strength: (avg yang-body − avg yin-body) / close — big up candles
+    #   + small down candles is the hallmark of a sustained uptrend
+    "recent_limit_up",    # fraction of 60d bars that hit A-share limit-up (≥9.5%)
+    "yang_ratio",         # fraction of candles where close > open (last 60 bars)
+    "candle_strength",    # (avg_yang_body − avg_yin_body) / close, clipped ±0.05
+    "above_ma50",         # binary: is price above its own 50-day MA?
+    "ma_spread",          # (MA50 - MA200) / MA200 — trend direction & strength
+    # ── Momentum breadth ─────────────────────────────────────────────────
+    "stoch_k",            # Stochastic %K (14-period): position in recent high/low range
+    "stoch_d",            # Stochastic %D (3-period SMA of %K): slower signal line
+    "ma50_slope",         # 5-bar rate of change of MA50 — trend acceleration signal
 ]
 
 
@@ -173,12 +180,24 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     # ── Volume ratio ─────────────────────────────────────────
     df["vol_ratio"] = volume / (volume.rolling(20).mean() + 1e-10)
 
-    # ── Chaikin Money Flow (CMF, 20-period) ──────────────────
-    # Money Flow Multiplier: +1.0 if close at high, −1.0 if close at low.
-    # CMF > 0 = buying pressure; CMF < 0 = selling pressure.
-    mfm            = (2 * close - high - low) / (high - low + 1e-10)
-    mfv            = mfm * volume
-    df["cmf_20"]  = mfv.rolling(20).sum() / (volume.rolling(20).sum() + 1e-10)
+    # ── Candle structure (阳多绿少) ────────────────────────────
+    # recent_limit_up: density of A-share 涨停 (≥9.5% daily gain) in last 60 bars.
+    #   Non-zero value confirms institutional (主力) presence — a prerequisite.
+    # yang_ratio: fraction of 阳线 (close > open) candles in last 60 bars.
+    #   Strong stocks show 阳多绿少: many large up-candles, few small down-candles.
+    # candle_strength: average yang-body minus average yin-body, normalised by
+    #   close.  Positive = up-candles dominate; clipped ±0.05 to suppress outliers.
+    limit_up_flag        = (ret >= 0.095).astype(float)
+    df["recent_limit_up"] = limit_up_flag.rolling(60, min_periods=30).mean()
+
+    yang_flag            = (close > df["open"]).astype(float)
+    df["yang_ratio"]      = yang_flag.rolling(60, min_periods=30).mean()
+
+    yang_body            = (close - df["open"]).clip(lower=0.0)
+    yin_body             = (df["open"] - close).clip(lower=0.0)
+    avg_yang_body        = yang_body.rolling(60, min_periods=20).mean()
+    avg_yin_body         = yin_body.rolling(60,  min_periods=20).mean()
+    df["candle_strength"] = ((avg_yang_body - avg_yin_body) / (close + 1e-10)).clip(-0.05, 0.05)
 
     # ── 52-week price position ───────────────────────────────
     high_52w = high.rolling(252, min_periods=20).max()
@@ -204,9 +223,6 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     # Near 1.0 on up-day = buyers in control; near 0.0 on down-day = sellers in control
     df["close_loc"] = (close - low) / (high - low + 1e-10)
 
-    # ── Overnight gap: open vs previous close ───────────────────────────
-    df["gap_pct"] = (df["open"] / close.shift(1) - 1).clip(-0.10, 0.10)
-
     # ── MA regime: self-contained trend signals ──────────────────────────
     # These let the model learn regime-conditional behaviour without look-ahead:
     # above_ma50  : binary flag (1 = price > own 50-day MA)
@@ -215,16 +231,6 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     ma200 = close.rolling(200, min_periods=60).mean()
     df["above_ma50"] = (close > ma50).astype(float)
     df["ma_spread"]  = ((ma50 - ma200) / (ma200 + 1e-10)).clip(-0.20, 0.20)
-
-    # ── Keltner Channel position ──────────────────────────────
-    # ATR-based channel (1.5× ATR width) centred on the 20-day MA.
-    # Complements bb_pos: Bollinger uses price std, Keltner uses ATR.
-    # Values outside [0, 1] mean price has broken out of the channel.
-    atr_abs         = df["atr_14"] * (close + 1e-10)  # convert pct ATR back to price units
-    kc_mid          = close.rolling(20).mean()
-    kc_upper        = kc_mid + 1.5 * atr_abs
-    kc_lower        = kc_mid - 1.5 * atr_abs
-    df["keltner_pos"] = (close - kc_lower) / (kc_upper - kc_lower + 1e-10)
 
     # ── MA50 slope (5-bar rate of change of the 50-day MA) ───
     # Positive slope = trend accelerating upward; negative = decelerating.

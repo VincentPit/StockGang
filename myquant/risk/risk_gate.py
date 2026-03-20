@@ -39,6 +39,7 @@ class RiskGate:
         6. Sector exposure check — max sector % of NAV
         7. VaR check             — 1-day 95% parametric VaR must stay under limit
         8. Hot-stock guard       — blocks BUY entries for recent-surge flagged symbols
+        9. MA20 life-line        — blocks BUY entries when price is below the 20-day MA
     """
 
     def __init__(
@@ -73,6 +74,9 @@ class RiskGate:
         # Hot-stock exclusion list (refreshed after each morning screen)
         self._hot_symbols: frozenset[str] = frozenset()
 
+        # MA20 map (symbol → current 20-day MA price) for the life-line check
+        self._ma20_map: dict[str, float] = {}
+
     # ── Public ────────────────────────────────────────────────
 
     def set_sector_map(self, sector_map: dict[str, str]) -> None:
@@ -103,6 +107,16 @@ class RiskGate:
         """
         self._hot_symbols = frozenset(s.upper() for s in symbols)
 
+    def set_ma20_map(self, ma20_map: dict[str, float]) -> None:
+        """
+        Inject current 20-day MA prices for the MA20 life-line check.
+
+        Per CN rule 2: “跨破20均线就要把他摄去” — do not enter (or hold) when price is
+        below the 20-day MA.  Call once per day (or per bar) with the latest
+        computed MA20 for each symbol in the universe.
+        """
+        self._ma20_map = {sym.upper(): ma20 for sym, ma20 in ma20_map.items()}
+
     def evaluate(
         self,
         signal: Signal,
@@ -127,6 +141,7 @@ class RiskGate:
             self._check_sector_limit,
             self._check_var,          # 7. VaR check
             self._check_hot_stock,    # 8. Hot-stock guard
+            self._check_below_ma20,   # 9. MA20 life-line
         ]
         final = RiskDecision(approved=True)
         for check in checks:
@@ -414,6 +429,33 @@ class RiskGate:
             return RiskDecision(
                 approved=False,
                 reason=f"{signal.symbol} is on the hot-stock exclusion list (recent price surge)",
+            )
+        return RiskDecision(approved=True)
+
+    def _check_below_ma20(self, signal: Signal) -> RiskDecision:
+        """
+        Layer 9 — MA20 life-line check.
+
+        Blocks new BUY entries when the latest close is below the 20-day MA.
+        Per CN rule 2: the 20-day MA is the “life line” of the price trend.
+        Anything below it is in a weakening trend — do not enter.
+        The 60-day MA break rule is enforced by the hard trend filter in the
+        screener; this layer provides a real-time runtime guard.
+        Exits are always permitted to allow orderly unwinding.
+        """
+        is_exit = signal.signal_type in (
+            SignalType.SELL, SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT
+        )
+        if is_exit:
+            return RiskDecision(approved=True)
+        ma20 = self._ma20_map.get(signal.symbol.upper())
+        if ma20 is not None and signal.price < ma20:
+            return RiskDecision(
+                approved=False,
+                reason=(
+                    f"{signal.symbol} price {signal.price:.2f} is below MA20 {ma20:.2f}"
+                    f" (跨破生命线规则 / life-line rule)"
+                ),
             )
         return RiskDecision(approved=True)
 

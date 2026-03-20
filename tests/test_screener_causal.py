@@ -58,6 +58,13 @@ def _make_closes(n: int = 260, trend: str = "up") -> np.ndarray:
 
 def _make_ohlcv_df(n: int = 260, trend: str = "up") -> pd.DataFrame:
     closes = _make_closes(n, trend)
+    # Inject one 涨停 (+10%) spike 30 bars from the end so every synthetic stock
+    # passes the new hard filter (limit_up_60d >= 1 required).  The spike also
+    # pushes hi52 above the final close, dropping price_52w_pct below 0.90 for
+    # monotone-up trends that would otherwise be near-peak-filtered.
+    if n >= 60:
+        lu_idx = n - 30
+        closes[lu_idx] = closes[lu_idx - 1] * 1.10
     dates  = pd.date_range("2024-01-01", periods=n, freq="B")
     return pd.DataFrame({
         "Close":  closes,
@@ -223,7 +230,7 @@ class TestFetchAndScore:
 class TestScreenerCausalNodes:
     """Test screen() with mocked yfinance and universe."""
 
-    FACTORS = ["trend_pct", "atr_pct", "autocorr", "ret_6m", "max_dd", "vol_60d", "dist_52w_high"]
+    FACTORS = ["trend_pct", "atr_pct", "autocorr", "ret_6m", "max_dd", "vol_60d", "dist_52w_high", "yang_ratio_60d"]
 
     @pytest.fixture(autouse=True)
     def _patch_universe_and_yf(self, monkeypatch):
@@ -255,7 +262,7 @@ class TestScreenerCausalNodes:
         for r in results:
             assert "causal_nodes" in r
 
-    def test_exactly_seven_factors(self):
+    def test_exactly_eight_factors(self):
         from myquant.tools.stock_screener import screen
         _, results, _ = screen(top_n=2, min_bars=50, verbose=False)
         for r in results:
