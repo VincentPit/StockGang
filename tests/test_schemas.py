@@ -242,6 +242,18 @@ class TestWorkflowRequest:
         with pytest.raises(ValidationError):
             WorkflowRequest(backtest_days=10)
 
+    def test_commission_rate_max_accepted(self):
+        req = WorkflowRequest(commission_rate=0.01)
+        assert req.commission_rate == pytest.approx(0.01)
+
+    def test_commission_rate_above_max_raises(self):
+        with pytest.raises(ValidationError):
+            WorkflowRequest(commission_rate=0.02)
+
+    def test_commission_rate_negative_raises(self):
+        with pytest.raises(ValidationError):
+            WorkflowRequest(commission_rate=-0.001)
+
 
 # ═══════════════════════════════════════════════════════════════════
 # OrderRequest

@@ -236,7 +236,8 @@ class WorkflowRequest(BaseModel):
     lookback_years: int = Field(default=1, ge=1, le=3)
     backtest_days: int = Field(default=365, ge=30, le=730)
     initial_cash: float = Field(default=1_000_000.0, ge=10_000)
-    commission_rate: float = Field(default=0.0003)
+    commission_rate: float = Field(default=0.0003, ge=0.0, le=0.01,
+                                   description="Round-trip commission fraction (0–1%)")
     stop_loss_pct: float = Field(default=-0.08, le=0)
     symbol_loss_cap: float = Field(default=-20_000.0, le=0)
     trailing_stop_pct: float = Field(default=0.0, ge=0.0, description="Trailing stop fraction (0=disabled)")
