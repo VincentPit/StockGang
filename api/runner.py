@@ -534,6 +534,13 @@ def _run_workflow_sync(jid: str, req: dict) -> None:
 
         _update_job(jid, {"top_symbols": top_syms, "screen_rows": screen_rows, "universe_size": universe_size})
 
+        if not top_syms:
+            _update_job(jid, {
+                "status": "done",
+                "error": "Screener found no qualifying stocks — try widening the universe or reducing min_bars.",
+            })
+            return
+
         # Phase 2 — backtesting the top picks
         _update_job(jid, {"status": "backtesting"})
         backtest_req = {
