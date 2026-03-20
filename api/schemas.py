@@ -15,12 +15,12 @@ class BacktestRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     symbols: list[str] = Field(
-        default=["sh600519", "sz300750"],
         description="List of SH/SZ A-share symbols, e.g. sh600519, sz300750"
     )
     lookback_days: int = Field(default=365, ge=30, le=730, description="Test window in days")
     initial_cash: float = Field(default=1_000_000.0, ge=10_000)
-    commission_rate: float = Field(default=0.0003)
+    commission_rate: float = Field(default=0.0003, ge=0.0, le=0.01,
+                                   description="Round-trip commission fraction (0–1%). Typical A-share: 0.0003")
     stop_loss_pct: float = Field(default=-0.08, le=0)
     symbol_loss_cap: float = Field(default=-20_000.0, le=0)
     trailing_stop_pct: float = Field(default=0.0, ge=0.0, description="Trailing stop fraction (0=disabled)")
@@ -38,7 +38,11 @@ class BacktestRequest(BaseModel):
                 f"Only Shanghai (sh) and Shenzhen (sz) A-share symbols are supported. "
                 f"Unsupported: {', '.join(bad)}"
             )
-        return cleaned
+        # Deduplicate (preserve order) and cap at 20 to prevent abuse
+        deduped = list(dict.fromkeys(cleaned))
+        if len(deduped) > 20:
+            raise ValueError("At most 20 symbols may be submitted per backtest")
+        return deduped
 
 
 class TradeRow(BaseModel):

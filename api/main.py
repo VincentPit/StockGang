@@ -507,13 +507,16 @@ async def get_news(
 @app.get("/api/regime", response_model=RegimeResponse)
 async def get_regime(
     symbols: str = Query(
-        default="hk00700,sh600519,hk00883,sz300750",
-        description="Comma-separated symbol list to analyse"
+        default="",
+        description="Comma-separated symbol list to analyse (e.g. sh600519,sz300750)"
     ),
     response: Response = None,
 ):
     """Derive market regime from 1-year price history. Cached 4 h."""
     sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not sym_list:
+        # No symbols provided — return a neutral stance instead of using hardcoded defaults
+        return RegimeResponse(regime="NEUTRAL", signal_multiplier=1.0, symbols_analyzed=0)
     result   = await asyncio.to_thread(get_regime_sync, sym_list)
     if response is not None:
         response.headers["Cache-Control"] = "public, max-age=14400"

@@ -235,3 +235,253 @@ class TestSectorLimit:
         sig = _signal("hk00700", signal_type=SignalType.SELL)
         d = gate.evaluate(sig, sim_time=self.SIM)
         assert d.approved
+
+
+# ── Layer 7: VaR check ─────────────────────────────────────────────────────────
+
+class TestVaR:
+    SIM = datetime(2024, 6, 15, 9, 30)
+
+    def test_small_position_within_var_limit(self):
+        """Small position + low vol → VaR well under 8% of NAV."""
+        gate = _gate(nav=1_000_000)
+        gate.set_vol_estimate("hk00700", 0.015)
+        # 100 shares × ¥300 = ¥30 000 notional; VaR = 30 000 × 0.015 × 1.645 = ¥740 (0.07%)
+        d = gate.evaluate(_signal("hk00700", price=300, qty=100), sim_time=self.SIM)
+        assert d.approved
+
+    def test_large_position_exceeds_var_limit(self):
+        """Multiple high-vol existing positions fill VaR budget; new trade tips it over.
+
+        Note: a single position cannot exceed VaR by itself because the position-limit
+        layer (5) fires first and caps exposure at MAX_POSITION_PCT (~20% of NAV).
+        With 20% NAV × vol × 1.645 > 8%, vol would need to be >24% daily — unrealistic.
+        We instead pre-load 5 existing positions (each 12% of NAV at 8% daily vol)
+        to reach ~7.9% portfolio VaR, then the new trade tips it above the 8% ceiling.
+        """
+        # 5 existing positions: each 12K shares × 10 = 120 000 market value (12% of 1M NAV)
+        # Vol = 8% daily. VaR per position = 120 000 × 0.08 × 1.645 = 15 792
+        # Total portfolio VaR = 5 × 15 792 = 78 960 = 7.9% of 1M NAV
+        syms   = ["sz000001", "sz000002", "sz000003", "sz000004", "sz000005"]
+        pos    = {s: _make_pos(s, 12_000, 10.0) for s in syms}
+        gate   = _gate(nav=1_000_000, positions=pos)
+        for s in syms:
+            gate.set_vol_estimate(s, 0.08)
+        # New position: 50K × 8% daily vol → VaR = 50 000 × 0.08 × 1.645 = 6 580
+        # Total = 78 960 + 6 580 = 85 540 > 80 000 (8% of 1M)
+        gate.set_vol_estimate("hk00700", 0.08)
+        d = gate.evaluate(_signal("hk00700", price=1.0, qty=50_000), sim_time=self.SIM)
+        assert not d.approved
+        assert "var" in d.reason.lower()
+
+    def test_var_includes_existing_positions(self):
+        """Accumulated portfolio VaR from many existing positions causes rejection."""
+        syms = ["sz000001", "sz000002", "sz000003", "sz000004", "sz000005",
+                "sz000006", "sz000007"]
+        pos  = {s: _make_pos(s, 10_000, 10.0) for s in syms}  # 100K each
+        gate = _gate(nav=1_000_000, positions=pos)
+        for s in syms:
+            gate.set_vol_estimate(s, 0.08)   # VaR/pos = 100K × 0.08 × 1.645 = 13 160
+        # 7 positions × 13 160 = 92 120 = 9.2% > 8% limit — any new BUY should be blocked
+        gate.set_vol_estimate("hk00700", 0.08)
+        d = gate.evaluate(_signal("hk00700", price=1.0, qty=100), sim_time=self.SIM)
+        assert not d.approved
+        assert "var" in d.reason.lower()
+
+    def test_exit_bypasses_var(self):
+        """SELL signals bypass the VaR check entirely."""
+        pos = {"hk00700": _make_pos("hk00700", 10_000, 300.0)}
+        gate = _gate(nav=1_000_000, positions=pos)
+        gate.set_vol_estimate("hk00700", 0.10)   # extreme vol
+        sig = _signal("hk00700", signal_type=SignalType.SELL)
+        d = gate.evaluate(sig, sim_time=self.SIM)
+        assert d.approved
+
+    def test_zero_nav_bypasses_var(self):
+        gate = RiskGate(nav_getter=lambda: 0, positions_getter=lambda: {})
+        d = gate.evaluate(_signal(), sim_time=self.SIM)
+        assert d.approved  # nav=0 edge case handled gracefully
+
+    def test_bulk_vol_update(self):
+        """set_vol_estimates bulk update changes future evaluations."""
+        gate = _gate(nav=1_000_000)
+        gate.set_vol_estimates({"hk00700": 0.10, "sh600036": 0.02})
+        assert gate._vol_estimates["hk00700"] == pytest.approx(0.10)
+        assert gate._vol_estimates["sh600036"] == pytest.approx(0.02)
+
+    def test_default_vol_used_when_no_estimate(self):
+        """Missing per-symbol estimate falls back to default_daily_vol."""
+        gate = _gate(nav=1_000_000)
+        # No explicit estimate set for hk00700; but default is 2% → small position OK
+        d = gate.evaluate(_signal("hk00700", price=300, qty=100), sim_time=self.SIM)
+        assert d.approved
+
+
+# ── Layer 8: Hot-stock guard ───────────────────────────────────────────────────
+
+class TestHotStockGuard:
+    SIM = datetime(2024, 6, 15, 9, 30)
+
+    def test_unlisted_symbol_not_blocked(self):
+        gate = _gate()
+        gate.set_hot_symbols({"sh600519"})   # Maotai is hot — not our test symbol
+        d = gate.evaluate(_signal("hk00700"), sim_time=self.SIM)
+        assert d.approved
+
+    def test_hot_symbol_buy_blocked(self):
+        gate = _gate()
+        gate.set_hot_symbols({"sh600519"})
+        d = gate.evaluate(_signal("sh600519"), sim_time=self.SIM)
+        assert not d.approved
+        assert "hot" in d.reason.lower() or "exclusion" in d.reason.lower()
+
+    def test_hot_symbol_sell_allowed(self):
+        """Exits must always be permitted even for hot-stock listed symbols."""
+        pos = {"sh600519": _make_pos("sh600519", 100, 1500.0)}
+        gate = _gate(nav=1_000_000, positions=pos)
+        gate.set_hot_symbols({"sh600519"})
+        sig = _signal("sh600519", signal_type=SignalType.SELL)
+        d = gate.evaluate(sig, sim_time=self.SIM)
+        assert d.approved
+
+    def test_set_hot_symbols_is_case_insensitive(self):
+        """set_hot_symbols uppercases; evaluate also uppercases signal.symbol."""
+        gate = _gate()
+        gate.set_hot_symbols({"SH600519"})   # upper-case input
+        d = gate.evaluate(_signal("sh600519"), sim_time=self.SIM)
+        assert not d.approved
+
+    def test_empty_hot_list_approves_all(self):
+        gate = _gate()
+        gate.set_hot_symbols(set())
+        d = gate.evaluate(_signal("sh600519"), sim_time=self.SIM)
+        assert d.approved
+
+    def test_hot_list_replaced_on_new_call(self):
+        """Calling set_hot_symbols again replaces the previous list."""
+        gate = _gate()
+        gate.set_hot_symbols({"sh600519"})
+        # Remove sh600519, add another symbol
+        gate.set_hot_symbols({"sz300750"})
+        d_old = gate.evaluate(_signal("sh600519"), sim_time=self.SIM)
+        d_new = gate.evaluate(_signal("sz300750"), sim_time=self.SIM)
+        assert d_old.approved      # sh600519 no longer blocked
+        assert not d_new.approved  # sz300750 now blocked
+
+    def test_multiple_hot_symbols_all_blocked(self):
+        gate = _gate()
+        gate.set_hot_symbols({"sh600519", "sz300750", "sh601318"})
+        for sym in ["sh600519", "sz300750", "sh601318"]:
+            d = gate.evaluate(_signal(sym), sim_time=self.SIM)
+            assert not d.approved, f"Expected {sym} to be blocked"
+
+
+# ── Layer 9: MA20 life-line ────────────────────────────────────────────────────
+
+class TestMA20Lifeline:
+    SIM = datetime(2024, 6, 15, 9, 30)
+
+    def test_price_above_ma20_approved(self):
+        gate = _gate()
+        gate.set_ma20_map({"hk00700": 290.0})   # MA20 = 290; signal price = 300
+        d = gate.evaluate(_signal("hk00700", price=300.0), sim_time=self.SIM)
+        assert d.approved
+
+    def test_price_below_ma20_rejected(self):
+        gate = _gate()
+        gate.set_ma20_map({"hk00700": 310.0})   # MA20 = 310; signal price = 300
+        d = gate.evaluate(_signal("hk00700", price=300.0), sim_time=self.SIM)
+        assert not d.approved
+        assert "ma20" in d.reason.lower() or "life-line" in d.reason.lower() or "ma" in d.reason.lower()
+
+    def test_price_exactly_at_ma20_approved(self):
+        """Price equal to MA20 (not below) — should pass."""
+        gate = _gate()
+        gate.set_ma20_map({"hk00700": 300.0})
+        d = gate.evaluate(_signal("hk00700", price=300.0), sim_time=self.SIM)
+        assert d.approved
+
+    def test_no_ma20_entry_always_passes(self):
+        """If no MA20 is known for this symbol, the check must not block."""
+        gate = _gate()
+        gate.set_ma20_map({})   # empty map
+        d = gate.evaluate(_signal("hk00700", price=300.0), sim_time=self.SIM)
+        assert d.approved
+
+    def test_sell_below_ma20_allowed(self):
+        """Exits are always allowed regardless of MA20."""
+        pos = {"hk00700": _make_pos("hk00700", 100, 300.0)}
+        gate = _gate(nav=1_000_000, positions=pos)
+        gate.set_ma20_map({"hk00700": 350.0})   # price will be 300 < MA20 350
+        sig = _signal("hk00700", signal_type=SignalType.SELL, price=300.0)
+        d = gate.evaluate(sig, sim_time=self.SIM)
+        assert d.approved
+
+    def test_ma20_map_case_insensitive(self):
+        """MA20 map should match regardless of symbol case."""
+        gate = _gate()
+        gate.set_ma20_map({"HK00700": 310.0})   # upper-case key
+        d = gate.evaluate(_signal("hk00700", price=300.0), sim_time=self.SIM)
+        assert not d.approved
+
+    def test_ma20_map_replaced_on_new_call(self):
+        gate = _gate()
+        gate.set_ma20_map({"hk00700": 310.0})   # price 300 < MA20 310 → blocked
+        d1 = gate.evaluate(_signal("hk00700", price=300.0), sim_time=self.SIM)
+        assert not d1.approved
+
+        gate.set_ma20_map({"hk00700": 280.0})   # now MA20 = 280 < 300 → allowed
+        d2 = gate.evaluate(_signal("hk00700", price=300.0), sim_time=self.SIM)
+        assert d2.approved
+
+    def test_reason_mentions_symbol_and_prices(self):
+        gate = _gate()
+        gate.set_ma20_map({"SH600036": 50.0})
+        d = gate.evaluate(_signal("sh600036", price=45.0), sim_time=self.SIM)
+        assert not d.approved
+        assert "45" in d.reason or "50" in d.reason
+
+
+# ── Layer ordering: later layers don't fire if earlier ones reject ─────────────
+
+class TestLayerOrdering:
+    SIM = datetime(2024, 6, 15, 9, 30)
+
+    def test_drawdown_fires_before_hot_stock(self):
+        """Drawdown (layer 3) should reject before hot-stock (layer 8) is evaluated."""
+        gate = _gate(nav=900_000)
+        gate.record_nav(1_000_000, sim_date=SIM.date() if False else datetime(2024, 6, 15).date())
+        gate.set_hot_symbols({"sh600036"})
+        d = gate.evaluate(_signal("sh600036"), sim_time=self.SIM)
+        assert not d.approved
+        assert "drawdown" in d.reason.lower()   # drawdown message, not hot-stock
+
+    def test_hot_stock_fires_before_ma20(self):
+        """Hot-stock guard (layer 8) fires before MA20 (layer 9)."""
+        gate = _gate()
+        gate.set_hot_symbols({"hk00700"})
+        gate.set_ma20_map({"hk00700": 350.0})   # would also block
+        d = gate.evaluate(_signal("hk00700", price=300.0), sim_time=self.SIM)
+        assert not d.approved
+        # Should mention hot-stock, not MA20 (hot-stock fires first)
+        assert "hot" in d.reason.lower() or "exclusion" in d.reason.lower()
+
+
+# ── set_vol_estimate backward compatibility ────────────────────────────────────
+
+class TestVolEstimateAPI:
+    def test_single_symbol_update(self):
+        gate = _gate()
+        gate.set_vol_estimate("hk00700", 0.025)
+        assert gate._vol_estimates["hk00700"] == pytest.approx(0.025)
+
+    def test_bulk_does_not_clear_previous(self):
+        gate = _gate()
+        gate.set_vol_estimate("hk00700", 0.025)
+        gate.set_vol_estimates({"sh600036": 0.018})
+        # Original entry should still be there
+        assert gate._vol_estimates["hk00700"] == pytest.approx(0.025)
+        assert gate._vol_estimates["sh600036"] == pytest.approx(0.018)
+
+
+SIM = datetime(2024, 6, 15, 9, 30)

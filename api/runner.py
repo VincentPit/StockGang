@@ -537,11 +537,13 @@ def _run_workflow_sync(jid: str, req: dict) -> None:
         # Phase 2 — backtesting the top picks
         _update_job(jid, {"status": "backtesting"})
         backtest_req = {
-            "lookback_days":  req["backtest_days"],
-            "initial_cash":   req["initial_cash"],
+            "lookback_days":   req["backtest_days"],
+            "initial_cash":    req["initial_cash"],
             "commission_rate": req["commission_rate"],
-            "stop_loss_pct":  req["stop_loss_pct"],
+            "stop_loss_pct":   req["stop_loss_pct"],
             "symbol_loss_cap": req["symbol_loss_cap"],
+            "trailing_stop_pct": req.get("trailing_stop_pct", 0.0),
+            "take_profit_pct":   req.get("take_profit_pct", 0.0),
         }
         result = _backtest_core(top_syms, backtest_req)
         _update_job(jid, {"status": "done", **result})
