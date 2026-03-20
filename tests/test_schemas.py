@@ -161,6 +161,10 @@ class TestScreenRequest:
         with pytest.raises(ValidationError, match="Unknown index"):
             ScreenRequest(indices=["999999"])
 
+    def test_empty_indices_raises(self):
+        with pytest.raises(ValidationError, match="at least one"):
+            ScreenRequest(indices=[])
+
     def test_top_n_minimum(self):
         assert ScreenRequest(top_n=1).top_n == 1
 
@@ -253,6 +257,14 @@ class TestWorkflowRequest:
     def test_commission_rate_negative_raises(self):
         with pytest.raises(ValidationError):
             WorkflowRequest(commission_rate=-0.001)
+
+    def test_empty_indices_raises(self):
+        with pytest.raises(ValidationError, match="at least one"):
+            WorkflowRequest(indices=[])
+
+    def test_unknown_index_raises(self):
+        with pytest.raises(ValidationError, match="Unknown index"):
+            WorkflowRequest(indices=["999999"])
 
 
 # ═══════════════════════════════════════════════════════════════════

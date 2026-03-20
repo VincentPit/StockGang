@@ -111,6 +111,8 @@ class ScreenRequest(BaseModel):
     @field_validator("indices")
     @classmethod
     def valid_indices(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("indices must contain at least one CSI index code")
         valid = {"000300", "000905", "000852"}
         bad = [x for x in v if x not in valid]
         if bad:
@@ -246,6 +248,17 @@ class WorkflowRequest(BaseModel):
         default=["000300"],
         description="CSI index codes to screen: 000300=CSI300, 000905=CSI500",
     )
+
+    @field_validator("indices")
+    @classmethod
+    def valid_indices(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("indices must contain at least one CSI index code")
+        valid = {"000300", "000905", "000852"}
+        bad = [x for x in v if x not in valid]
+        if bad:
+            raise ValueError(f"Unknown index codes: {bad}. Valid: {sorted(valid)}")
+        return v
 
 
 class WorkflowResponse(BaseModel):
