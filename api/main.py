@@ -60,8 +60,25 @@ _log = logging.getLogger(__name__)
 
 _VERSION = "1.0.0"  # single source of truth — consumed by FastAPI() and /api/health
 
-from api import db as _db
-from api.schemas import (
+from api import db as _db  # noqa: E402
+from api.runner import (  # noqa: E402
+    get_fundamentals_sync,
+    get_job,
+    get_macro_news_sync,
+    get_news_sync,
+    get_price_sync,
+    get_regime_sync,
+    launch_analyze,
+    launch_backtest,
+    launch_recommend,
+    launch_screener,
+    launch_train,
+    launch_train_loop,
+    launch_workflow,
+    list_jobs,
+    new_job,
+)
+from api.schemas import (  # noqa: E402
     AccountInfo,
     AccountPosition,
     AnalysisResponse,
@@ -87,24 +104,6 @@ from api.schemas import (
     WorkflowRequest,
     WorkflowResponse,
 )
-from api.runner import (
-    get_fundamentals_sync,
-    get_job,
-    get_macro_news_sync,
-    get_news_sync,
-    get_price_sync,
-    get_regime_sync,
-    launch_analyze,
-    launch_backtest,
-    launch_recommend,
-    launch_screener,
-    launch_train,
-    launch_train_loop,
-    launch_workflow,
-    list_jobs,
-    new_job,
-)
-
 
 # ── Request-ID middleware ─────────────────────────────────────────────────────
 

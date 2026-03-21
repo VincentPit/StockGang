@@ -3,18 +3,26 @@ Tests for strategy logic (no external data required).
 Includes TestFeatureEngineer — validates bars_to_features() output shape,
 all new features, and make_labels() ternary labels.
 """
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pytest
-from datetime import datetime, timedelta
+
+if TYPE_CHECKING:
+    from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
 
 from myquant.models.bar import Bar, BarInterval
 from myquant.models.signal import SignalType
-from myquant.strategy.technical.ma_crossover import MACrossoverStrategy, _sma, _ema
-from myquant.strategy.technical.rsi_strategy import RSIStrategy, _rsi
-from myquant.strategy.technical.macd_strategy import MACDStrategy
 from myquant.strategy.ml.feature_engineer import (
-    FEATURE_COLS, bars_to_features, make_labels,
+    FEATURE_COLS,
+    bars_to_features,
+    make_labels,
 )
+from myquant.strategy.technical.ma_crossover import MACrossoverStrategy, _ema, _sma
+from myquant.strategy.technical.rsi_strategy import RSIStrategy, _rsi
 
 
 def _make_bar(symbol: str, close: float, idx: int = 0) -> Bar:
@@ -261,8 +269,9 @@ class TestFeatureEngineer:
         # Build strongly trending bars where open < close on most days
         base = 100.0
         bars = []
-        from myquant.models.bar import Bar, BarInterval
         from datetime import datetime, timedelta
+
+        from myquant.models.bar import Bar, BarInterval
         for i in range(300):
             o = base + i * 0.15
             c = o + abs(np.random.normal(0.3, 0.05))  # close always above open
@@ -317,6 +326,7 @@ class TestLGBMEnsemble:
     def test_ensemble_predict_no_crash(self):
         """Calling on_bar after training should return Signal or None without error."""
         import asyncio
+
         from myquant.models.signal import Signal
         s = self._strategy(n_windows=2)
         bars = _make_bars(260, self.SYMBOL)
@@ -533,7 +543,7 @@ class TestStrategyBandit:
 
     def test_weight_bounded(self):
         """Weight must always stay within [W_MIN, W_MAX]."""
-        from myquant.strategy.rl.bandit import _WEIGHT_MIN, _WEIGHT_MAX
+        from myquant.strategy.rl.bandit import _WEIGHT_MAX, _WEIGHT_MIN
         b = self._bandit(["x"])
         for pnl in [1e9, -1e9, 0, 500, -500]:
             b.update("x", pnl)
@@ -588,7 +598,7 @@ class TestStrategyBandit:
         w_good = b.get_weight("lgbm", symbol="sh000001")
         w_bad  = b.get_weight("lgbm", symbol="sh600871")
         assert w_good > w_bad, "Winning symbol should outweigh losing symbol"
-        from myquant.strategy.rl.bandit import _WEIGHT_MIN, _WEIGHT_MAX
+        from myquant.strategy.rl.bandit import _WEIGHT_MAX, _WEIGHT_MIN
         assert _WEIGHT_MIN <= w_good <= _WEIGHT_MAX
         assert _WEIGHT_MIN <= w_bad  <= _WEIGHT_MAX
 
@@ -632,6 +642,7 @@ class TestMakeLabelsRL:
     def test_zero_commission_equals_plain_labels(self):
         """With commission_rate=0, cost-aware labels must equal plain make_labels()."""
         import pandas as pd
+
         from myquant.strategy.ml.feature_engineer import make_labels, make_labels_rl
         plain = make_labels(self.df, forward_days=5, threshold=0.015)
         rl    = make_labels_rl(self.df, forward_days=5, threshold=0.015, commission_rate=0.0)
@@ -650,6 +661,7 @@ class TestLGBMMinHold:
 
     def _trained_strategy(self, min_hold: int = 5) -> "LGBMStrategy":
         import asyncio
+
         from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
         s = LGBMStrategy(
             "test_minhold", [self.SYMBOL],
@@ -673,6 +685,7 @@ class TestLGBMMinHold:
         """With min_hold_bars=5, the strategy should emit fewer signals than
         a version with min_hold_bars=0 when fed the same bar sequence."""
         import asyncio
+
         from myquant.models.signal import Signal
         from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
 

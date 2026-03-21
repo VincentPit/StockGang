@@ -18,13 +18,10 @@ from __future__ import annotations
 
 import pickle
 import threading
-import time
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
-
 
 # ── Isolated DB ───────────────────────────────────────────────────────────────
 
@@ -54,8 +51,10 @@ class _MockModel:
 
     def predict_proba(self, X):
         row = [0.1, 0.2, 0.7]  # default: BUY
-        if self._pred == 0: row = [0.7, 0.2, 0.1]
-        elif self._pred == 1: row = [0.2, 0.6, 0.2]
+        if self._pred == 0:
+            row = [0.7, 0.2, 0.1]
+        elif self._pred == 1:
+            row = [0.2, 0.6, 0.2]
         return np.array([row] * len(X))
 
     def fit(self, X, y): return self
@@ -88,8 +87,7 @@ FEATS = ["ret_1d", "rsi_14", "macd_hist"]
 def _patch_recommend(monkeypatch):
     """Patch all external deps for get_recommendations()."""
     import api.advisor as adv
-    import api.runner  as runner
-    from myquant.data.fetchers.universe_fetcher import fetch_universe
+    import api.runner as runner
 
     # One-stock universe
     fake_universe = [{"sym": "sh600519", "yf_ticker": "600519.SS", "name": "Moutai"}]
@@ -499,8 +497,8 @@ class TestQualityPositionExtras:
 class TestRecommendRoute:
     @pytest.fixture(autouse=True)
     def _patch_route(self, monkeypatch):
-        import api.runner  as runner
         import api.advisor as adv
+        import api.runner as runner
 
         fake_universe = [{"sym": "sh600519", "yf_ticker": "600519.SS", "name": "Moutai"}]
         monkeypatch.setattr(
@@ -521,6 +519,7 @@ class TestRecommendRoute:
     @pytest.fixture
     def client(self):
         from fastapi.testclient import TestClient
+
         from api.main import app
         return TestClient(app)
 

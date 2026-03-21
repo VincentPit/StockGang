@@ -29,12 +29,12 @@ from __future__ import annotations
 
 import logging
 import pickle
+import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
@@ -248,7 +248,8 @@ def _train_single_window(
 
     if use_early_stop:
         try:
-            from lightgbm import early_stopping as _es, log_evaluation as _le
+            from lightgbm import early_stopping as _es
+            from lightgbm import log_evaluation as _le
             model.fit(
                 X_train, y_train,
                 eval_set=[(X_val, y_val)],
@@ -297,8 +298,8 @@ def _train_lgbm(
     last_bar_date : str  ISO date of the last bar in ``df``
     """
     try:
-        import lightgbm as lgb
-        import numpy as np
+        import lightgbm as lgb  # noqa: F401
+        import numpy as np  # noqa: F401
     except ImportError as exc:
         raise RuntimeError("lightgbm is not installed") from exc
 
@@ -408,7 +409,6 @@ def _feature_importance(model: Any, feat_cols: list[str]) -> list[dict]:
     Unwraps CalibratedClassifierCV wrappers to reach the raw LGBMClassifier.
     """
     try:
-        import numpy as np
         # CalibratedClassifierCV stores the base estimator as .estimator
         estimator = getattr(model, "estimator", model)
         imp = estimator.feature_importances_
@@ -491,8 +491,8 @@ def analyze_stock(symbol: str, force_retrain: bool = False) -> dict:
     3. Fetch fundamentals and 5 recent news headlines.
     4. Return combined analysis dict.
     """
-    from myquant.strategy.ml.feature_engineer import FEATURE_COLS, bars_to_features
     from api.runner import get_fundamentals_sync, get_news_sync
+    from myquant.strategy.ml.feature_engineer import bars_to_features
 
     # ── Model ─────────────────────────────────────────────────────────────
     train_meta = train_for_symbol(symbol, force=force_retrain)
@@ -603,9 +603,10 @@ def get_recommendations(sector: str | None = None, top_n: int = 10) -> list[dict
     Returns a list of dicts sorted by descending composite score.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from api.runner import get_fundamentals_sync, get_price_sync
-    from myquant.strategy.ml.feature_engineer import bars_to_features
     from myquant.data.fetchers.universe_fetcher import fetch_universe
+    from myquant.strategy.ml.feature_engineer import bars_to_features
 
     # ── Universe: full live CSI300 + CSI500 (sector from SECTOR_MAP or "other") ─
     _raw = fetch_universe(indices=["000300", "000905"])

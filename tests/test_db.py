@@ -4,10 +4,7 @@ No network calls.  Uses a temp file for the SQLite db to stay isolated.
 """
 from __future__ import annotations
 
-import time
 import pytest
-from pathlib import Path
-
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -233,8 +230,8 @@ class TestJobPersistence:
 # TestTrainedModels — CRUD for the trained_models table
 # ══════════════════════════════════════════════════════════════════════════════
 
-import pickle as _pickle
-import time   as _time
+import pickle as _pickle  # noqa: E402
+import time as _time  # noqa: E402
 
 
 class TestTrainedModels:
