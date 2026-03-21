@@ -60,7 +60,7 @@ const LADDER = [
 export default function TrainLoopPanel() {
   // Config
   const [topN,        setTopN]        = useState(3);
-  const [maxRounds,   setMaxRounds]   = useState(5);
+  const [maxRounds,   setMaxRounds]   = useState(1);
   const [symbolInput, setSymbolInput] = useState("");
 
   // Job state

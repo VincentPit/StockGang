@@ -494,13 +494,26 @@ def self_test_loop(
             rung["configs"], effective_top_n,
         )
 
+        # Map run_loop's 0–100 range into this round's slice of the 0–88 band
+        _round_slice = max(1, int(88 / n))
+
+        def _scoped_cb(
+            d: dict,
+            _base: int = pct_base,
+            _slice: int = _round_slice,
+            _rn: int = round_num,
+        ) -> None:
+            inner = d.get("pct", 0)
+            mapped = _base + int(inner / 100 * _slice)
+            _emit({"pct": min(mapped, _base + _slice - 1), "step": d.get("step", "")})
+
         result = run_loop(
             symbols      =symbols,
             top_n        =effective_top_n,
             lookback_days=rung["lookback_days"],
             train_years  =rung["train_years"],
             configs      =rung["configs"],
-            progress_cb  =None,   # suppress nested progress; we own the gauge
+            progress_cb  =_scoped_cb,  # per-trial progress now visible in UI
         )
 
         result["_round"] = round_num
