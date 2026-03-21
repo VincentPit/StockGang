@@ -4,13 +4,13 @@ No external data or network calls required.
 """
 from __future__ import annotations
 
-import pytest
 from datetime import datetime, timedelta
 
-from myquant.portfolio.portfolio_engine import PortfolioEngine
+import pytest
+
 from myquant.models.order import Order, OrderSide, OrderType
 from myquant.models.tick import Tick
-
+from myquant.portfolio.portfolio_engine import PortfolioEngine
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 

@@ -15,7 +15,6 @@ Coverage
 from __future__ import annotations
 
 import threading
-from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -522,8 +521,8 @@ class TestScreenerCausalDirections:
 class TestScreenViaAPI:
     @pytest.fixture(autouse=True)
     def _patch(self, monkeypatch):
+        import api.main as main_mod
         import api.runner as runner
-        import api.main   as main_mod
 
         fake_rows = [
             {
@@ -591,6 +590,7 @@ class TestScreenViaAPI:
     @pytest.fixture
     def client(self):
         from fastapi.testclient import TestClient
+
         from api.main import app
         return TestClient(app)
 

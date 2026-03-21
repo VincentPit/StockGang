@@ -18,7 +18,6 @@ from api.schemas import (
     WorkflowRequest,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════
 # BacktestRequest
 # ═══════════════════════════════════════════════════════════════════
@@ -208,12 +207,10 @@ class TestTrainRequest:
 
 class TestAnalyzeRequest:
     def test_valid(self):
-        from api.schemas import AnalyzeRequest
         req = AnalyzeRequest(symbol="sz000858")
         assert req.symbol == "sz000858"
 
     def test_invalid_raises(self):
-        from api.schemas import AnalyzeRequest
         with pytest.raises(ValidationError):
             AnalyzeRequest(symbol="TSLA")
 

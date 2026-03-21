@@ -15,12 +15,10 @@ Covers:
 """
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from myquant.models.bar import Bar, BarInterval
 from myquant.strategy.ml.feature_engineer import (
@@ -28,7 +26,6 @@ from myquant.strategy.ml.feature_engineer import (
     bars_to_features,
     make_labels,
 )
-
 
 # ── Factories ─────────────────────────────────────────────────────────────────
 

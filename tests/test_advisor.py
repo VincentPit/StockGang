@@ -20,12 +20,10 @@ from __future__ import annotations
 import pickle
 import threading
 import time
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
-
 
 # ── Isolated DB fixture (reuses same pattern as test_db.py) ──────────────────
 
@@ -209,7 +207,7 @@ class TestTrainedModelsDB:
 class TestStalenessLogic:
     def test_insufficient_new_data_skip(self):
         """< MIN_NEW_BARS extra bars → skip regardless of age."""
-        from api.advisor import _is_stale, MIN_NEW_BARS
+        from api.advisor import MIN_NEW_BARS, _is_stale
         meta   = _fake_meta(days_old=1.0, bar_count=250)
         stale, reason = _is_stale(meta, new_bar_count=250 + MIN_NEW_BARS - 1)
         assert not stale
@@ -217,7 +215,7 @@ class TestStalenessLogic:
 
     def test_exactly_min_new_bars_does_not_skip(self):
         """Exactly MIN_NEW_BARS extra triggers retrain."""
-        from api.advisor import _is_stale, MIN_NEW_BARS
+        from api.advisor import MIN_NEW_BARS, _is_stale
         meta   = _fake_meta(days_old=1.0, bar_count=250)
         stale, reason = _is_stale(meta, new_bar_count=250 + MIN_NEW_BARS)
         assert stale
@@ -233,7 +231,7 @@ class TestStalenessLogic:
 
     def test_model_outdated_triggers_retrain(self):
         """Model trained > STALE_MODEL_DAYS ago → always retrain."""
-        from api.advisor import _is_stale, STALE_MODEL_DAYS
+        from api.advisor import STALE_MODEL_DAYS, _is_stale
         meta   = _fake_meta(days_old=STALE_MODEL_DAYS + 1, bar_count=250)
         stale, reason = _is_stale(meta, new_bar_count=251)  # only 1 new bar
         assert stale
@@ -241,7 +239,7 @@ class TestStalenessLogic:
 
     def test_outdated_takes_priority_over_insufficient_data(self):
         """Outdated model should retrain even with zero new bars."""
-        from api.advisor import _is_stale, STALE_MODEL_DAYS
+        from api.advisor import STALE_MODEL_DAYS, _is_stale
         meta   = _fake_meta(days_old=STALE_MODEL_DAYS + 5, bar_count=250)
         stale, reason = _is_stale(meta, new_bar_count=250)
         assert stale
@@ -257,7 +255,7 @@ class TestStalenessLogic:
 
     def test_exact_stale_model_days_boundary(self):
         """Trained exactly STALE_MODEL_DAYS ago (not over) → not outdated."""
-        from api.advisor import _is_stale, STALE_MODEL_DAYS
+        from api.advisor import STALE_MODEL_DAYS, _is_stale
         # Exactly at the boundary: NOT stale (> is required)
         meta = _fake_meta(days_old=STALE_MODEL_DAYS - 0.01, bar_count=250)
         stale, reason = _is_stale(meta, new_bar_count=252)
@@ -388,8 +386,8 @@ class TestTrainForSymbol:
         assert result["skip_reason"]   is None
 
     def test_persists_model_to_db(self):
-        from api.advisor import train_for_symbol
         import api.db as db
+        from api.advisor import train_for_symbol
         train_for_symbol(self.SYMBOL)
         meta = db.get_model_meta(self.SYMBOL, "lgbm_core")
         assert meta is not None
@@ -397,8 +395,8 @@ class TestTrainForSymbol:
 
     def test_skips_fresh_model_with_insufficient_new_data(self):
         """Model stored yesterday with same bar count → skip."""
-        from api.advisor import train_for_symbol, MIN_NEW_BARS
         import api.db as db
+        from api.advisor import train_for_symbol
         # Pre-store a model that is 1 day old with 258 bars (260 - MIN_NEW_BARS + 2)
         db.save_model(self.SYMBOL, "lgbm_core", 258, "2025-03-01",
                       0.60, pickle.dumps(_MockModel()), self.FEATS)
@@ -408,8 +406,8 @@ class TestTrainForSymbol:
 
     def test_retrains_outdated_model(self):
         """Model stored 31 days ago → retrain even with few new bars."""
-        from api.advisor import train_for_symbol, STALE_MODEL_DAYS
         import api.db as db
+        from api.advisor import STALE_MODEL_DAYS, train_for_symbol
         old_ts = time.time() - (STALE_MODEL_DAYS + 1) * 86400
         db.save_model(self.SYMBOL, "lgbm_core", 259, "2025-02-01",
                       0.55, pickle.dumps(_MockModel()), self.FEATS)
@@ -424,8 +422,8 @@ class TestTrainForSymbol:
 
     def test_force_always_retrains(self):
         """force=True ignores staleness rules."""
-        from api.advisor import train_for_symbol
         import api.db as db
+        from api.advisor import train_for_symbol
         # Fresh model stored just now
         db.save_model(self.SYMBOL, "lgbm_core", 260, "2025-03-01",
                       0.60, pickle.dumps(_MockModel()), self.FEATS)
@@ -442,8 +440,8 @@ class TestTrainForSymbol:
 
     def test_model_blob_is_deserializable(self):
         """Saved blob must unpickle back to a usable object."""
-        from api.advisor import train_for_symbol
         import api.db as db
+        from api.advisor import train_for_symbol
         train_for_symbol(self.SYMBOL)
         blob, _ = db.load_model(self.SYMBOL, "lgbm_core")
         obj = pickle.loads(blob)
@@ -531,7 +529,7 @@ class TestAnalyzeStock:
         assert mm["oos_accuracy"] == pytest.approx(0.63)
 
     def test_sector_resolved(self):
-        from api.advisor import analyze_stock, SECTOR_MAP
+        from api.advisor import SECTOR_MAP, analyze_stock
         result = analyze_stock(self.SYMBOL)
         assert result["sector"] == SECTOR_MAP.get(self.SYMBOL, "unknown")
 
@@ -567,7 +565,6 @@ class TestGetRecommendations:
     @pytest.fixture(autouse=True)
     def _patch(self, monkeypatch):
         import api.runner as runner
-        import api.advisor as adv
 
         def _fake_price(sym, days=365):
             # 120 daily close prices starting at 100
@@ -621,7 +618,7 @@ class TestGetRecommendations:
             assert key in row, f"Missing key: {key}"
 
     def test_sector_filter_excludes_other_sectors(self):
-        from api.advisor import get_recommendations, SECTOR_MAP
+        from api.advisor import get_recommendations
         rows = get_recommendations(sector="tech", top_n=20)
         for r in rows:
             assert r["sector"] == "tech", f"{r['symbol']} has sector {r['sector']}"
@@ -641,8 +638,8 @@ class TestGetRecommendations:
 
     def test_model_signal_when_stored_model_present(self):
         """Store a BUY model for hk00700 → model_signal reflects it."""
-        import api.db as db
         import api.advisor as adv
+        import api.db as db
         from api.advisor import get_recommendations
         feat = ["ret_1d", "rsi_14", "macd_hist"]
         blob = pickle.dumps(_MockModel(pred_class=2))   # BUY
@@ -683,7 +680,6 @@ class TestAdvisorRoutes:
         immediately set the job to 'done' with canned payloads.
         """
         import api.runner as runner
-        import api.db    as db
 
         FAKE_TRAIN_META = {
             "status":        "done",
@@ -753,6 +749,7 @@ class TestAdvisorRoutes:
     @pytest.fixture
     def client(self):
         from fastapi.testclient import TestClient
+
         from api.main import app
         return TestClient(app)
 

@@ -2,6 +2,7 @@
 Tests for PaperBroker — order fill simulation.
 """
 import asyncio
+
 import pytest
 
 from myquant.execution.brokers.paper_broker import PaperBroker

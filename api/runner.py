@@ -11,6 +11,7 @@ import asyncio
 import atexit
 import logging
 import os
+import sys
 import time
 import traceback
 import uuid
@@ -19,7 +20,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from api import db as _db
@@ -188,14 +188,14 @@ def _backtest_core(symbols: list, req: dict) -> dict:
         except Exception as _e:
             _log.warning("_backtest_core: could not parse best_params.json: %s", _e)
 
-    from myquant.backtest.simulator import Backtester, BacktestConfig
+    from myquant.backtest.simulator import BacktestConfig, Backtester
+    from myquant.config.logging_config import setup_logging
     from myquant.models.bar import BarInterval
     from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
+    from myquant.strategy.nlp.news_strategy import NewsStrategy
     from myquant.strategy.technical.ma_crossover import MACrossoverStrategy
     from myquant.strategy.technical.macd_strategy import MACDStrategy
     from myquant.strategy.technical.rsi_strategy import RSIStrategy
-    from myquant.strategy.nlp.news_strategy import NewsStrategy
-    from myquant.config.logging_config import setup_logging
     setup_logging()
 
     end_date   = datetime.now()
@@ -347,9 +347,12 @@ def get_price_sync(symbol: str, days: int = 365) -> dict:
     if hit is not None:
         return hit
 
-    from myquant.data.fetchers.historical_loader import _symbol_to_yfinance
+    from datetime import date as date_type
+    from datetime import timedelta as td
+
     import yfinance as yf
-    from datetime import date as date_type, timedelta as td
+
+    from myquant.data.fetchers.historical_loader import _symbol_to_yfinance
 
     yf_ticker = _symbol_to_yfinance(symbol)
     if not yf_ticker:
@@ -477,10 +480,13 @@ def get_regime_sync(symbols: list[str]) -> dict:
     if hit is not None:
         return hit
 
-    from myquant.data.fetchers.macro_proxy import HistoricalRegimeDetector
-    from myquant.data.fetchers.historical_loader import _symbol_to_yfinance
+    from datetime import date as date_type
+    from datetime import timedelta as td
+
     import yfinance as yf
-    from datetime import date as date_type, timedelta as td
+
+    from myquant.data.fetchers.historical_loader import _symbol_to_yfinance
+    from myquant.data.fetchers.macro_proxy import HistoricalRegimeDetector
 
     detector   = HistoricalRegimeDetector()
     analyzed   = 0

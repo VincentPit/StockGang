@@ -12,15 +12,12 @@ Tests for:
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from myquant.data.fetchers.fundamental_fetcher import FundamentalSnapshot
 from myquant.data.fetchers.macro_fetcher import MacroSnapshot
 from myquant.models.signal import Signal, SignalStrength, SignalType
 from myquant.strategy.macro_filter import MacroFilter
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers

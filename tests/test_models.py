@@ -1,14 +1,14 @@
 """
 Tests for core data models.
 """
-import pytest
 from datetime import datetime
 
-from myquant.models.tick import Tick
+import pytest
+
 from myquant.models.bar import Bar, BarInterval
-from myquant.models.signal import Signal, SignalType, SignalStrength
 from myquant.models.order import Order, OrderSide, OrderStatus, OrderType
 from myquant.models.position import Position
+from myquant.models.tick import Tick
 
 
 class TestTick:

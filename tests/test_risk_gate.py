@@ -4,14 +4,13 @@ No external data or network calls required.
 """
 from __future__ import annotations
 
-import time
-import pytest
 from datetime import datetime
 
-from myquant.risk.risk_gate import RiskGate, RiskDecision
-from myquant.models.signal import Signal, SignalType, SignalStrength
-from myquant.models.position import Position
+import pytest
 
+from myquant.models.position import Position
+from myquant.models.signal import Signal, SignalType
+from myquant.risk.risk_gate import RiskGate
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -76,7 +75,7 @@ class TestMarketHours:
     def test_ashare_rejected_outside_hours(self):
         gate = _gate()
         # 07:00 — A-shares not open
-        off_hours = datetime(2024, 6, 15, 7, 0)
+        datetime(2024, 6, 15, 7, 0)
         d = gate.evaluate(_signal("sh600036"), sim_time=None)
         # We can't control wall-clock, so just confirm the gate doesn't crash
         assert isinstance(d.approved, bool)
@@ -116,7 +115,6 @@ class TestDrawdown:
         assert d.approved
 
     def test_over_limit_rejects(self):
-        from myquant.config.settings import settings
         # Nav dropped more than DAILY_DRAWDOWN_LIMIT (typically -5%)
         gate = _gate(nav=900_000)
         gate.record_nav(1_000_000, sim_date=self.SIM.date())
@@ -138,7 +136,7 @@ class TestCooldown:
     def test_immediate_repeat_rejected(self):
         gate = _gate()
         gate.cooldown_seconds = 60
-        epoch = self.SIM.timestamp()
+        self.SIM.timestamp()
         gate.evaluate(_signal(), sim_time=self.SIM)
         # Same epoch → cooldown not elapsed
         d = gate.evaluate(_signal(), sim_time=self.SIM)

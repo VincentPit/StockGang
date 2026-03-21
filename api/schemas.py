@@ -3,11 +3,9 @@ api/schemas.py — Pydantic request/response models for the MyQuant API.
 """
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 
 # ── Backtest ─────────────────────────────────────────────────────────────────
 

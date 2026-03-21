@@ -4,14 +4,14 @@ No external data or network calls required.
 """
 from __future__ import annotations
 
-import pytest
 from datetime import datetime, timedelta
 
-from myquant.strategy.sizing import atr_position_size
-from myquant.strategy.technical.macd_strategy import MACDStrategy, _macd, _ema_series
+import pytest
+
 from myquant.models.bar import Bar, BarInterval
 from myquant.models.signal import SignalType
-
+from myquant.strategy.sizing import atr_position_size
+from myquant.strategy.technical.macd_strategy import MACDStrategy, _ema_series, _macd
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
