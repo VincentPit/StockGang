@@ -297,11 +297,11 @@ class Backtester:
                 bandit_weight = self._bandit.get_weight(signal.strategy_id, symbol=signal.symbol)
                 adj_conf = min(1.0, adj_conf * bandit_weight)
 
-                # Suppress new longs in RISK_OFF unless model is very confident
+                # Suppress new longs in RISK_OFF unless model is reasonably confident
                 if (
                     self._regime_detector.is_risk_off()
                     and signal.signal_type == SignalType.BUY
-                    and adj_conf < 0.70
+                    and adj_conf < 0.60
                 ):
                     logger.debug(
                         "REGIME suppressed BUY %s (RISK_OFF, conf=%.2f)",
@@ -309,14 +309,15 @@ class Backtester:
                     )
                     continue
 
-                # Suppress BUY when price is below symbol's MA50 + 1% buffer (trend filter)
+                # Suppress BUY only when price is significantly below MA50 (>3% under)
+                # Prior filter (< MA50*1.01) was too strict — blocked normal pullback entries.
                 if signal.signal_type == SignalType.BUY:
                     ma50 = self._ma50.get(signal.symbol, 0.0)
                     cur_price = self._current_prices.get(signal.symbol, 0.0)
-                    if ma50 > 0 and cur_price < ma50 * 1.01:
+                    if ma50 > 0 and cur_price < ma50 * 0.97:
                         logger.debug(
-                            "MA50 suppressed BUY %s (price=%.2f < MA50*1.01=%.2f)",
-                            signal.symbol, cur_price, ma50 * 1.01,
+                            "MA50 suppressed BUY %s (price=%.2f < MA50*0.97=%.2f)",
+                            signal.symbol, cur_price, ma50 * 0.97,
                         )
                         continue
 

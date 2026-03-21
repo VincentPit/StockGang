@@ -95,6 +95,8 @@ class LGBMStrategy(BaseStrategy):
         commission_rate: float = 0.0003, # one-way commission — raises label threshold
         binary_mode: bool = True,        # BUY/NOTBUY instead of 3-class SELL/HOLD/BUY
         regime_gate: bool = True,         # tighten confidence threshold when ADX<20 (choppy market)
+        horizon_exit: bool = True,        # emit SELL after forward_days*horizon_mult bars if not bullish
+        horizon_mult: float = 2.0,        # multiplier on forward_days to get max hold bars
         # ── LightGBM hyperparameters ────────────────────────────────────
         num_leaves: int = 63,
         n_estimators: int = 500,
@@ -114,6 +116,10 @@ class LGBMStrategy(BaseStrategy):
         self.commission_rate     = commission_rate
         self.binary_mode         = binary_mode
         self.regime_gate         = regime_gate
+        self.horizon_exit        = horizon_exit
+        self.horizon_mult        = horizon_mult
+        # Max bars to hold a position before forced re-evaluation
+        self._max_hold_bars = max(1, int(forward_days * horizon_mult))
 
         self._lgb_params = dict(
             num_leaves        = num_leaves,
@@ -140,6 +146,8 @@ class LGBMStrategy(BaseStrategy):
         # Cooldown tracking: last bar index on which a signal was emitted per symbol
         self._bar_index:        dict[str, int] = {}   # global bar counter per symbol
         self._last_signal_bar:  dict[str, int] = {}   # bar index when last signal fired
+        # Horizon exit: bar index when the last BUY was emitted per symbol
+        self._last_buy_bar:     dict[str, int] = {}   # bar index of last BUY signal
 
         # Optional: injected MacroFetcher
         self._macro_fetcher = None
@@ -191,9 +199,24 @@ class LGBMStrategy(BaseStrategy):
             if (idx - last) < self.min_hold_bars:
                 return None
 
+        # ── Horizon exit: force SELL if held too long and model is no longer bullish ──
+        # Only fire when there is an ACTIVE buy recorded — prevents spurious SELLs
+        # before any position is ever opened (default -9999 would always trigger).
+        if (
+            self.horizon_exit
+            and self._is_trained.get(symbol)
+            and symbol in self._last_buy_bar
+            and (idx - self._last_buy_bar[symbol]) >= self._max_hold_bars
+        ):
+            exit_sig = self._horizon_sell(symbol, bar)
+            if exit_sig is not None:
+                return exit_sig
+
         sig = self._predict_signal(symbol, bar)
         if sig is not None:
             self._last_signal_bar[symbol] = idx
+            if sig.signal_type.name == "BUY":
+                self._last_buy_bar[symbol] = idx
         return sig
 
     # ── Training helpers ──────────────────────────────────────────────────────
@@ -248,7 +271,9 @@ class LGBMStrategy(BaseStrategy):
 
         model = lgb.LGBMClassifier(**self._lgb_params)
 
-        if use_early_stop:
+        if use_early_stop and len(np.unique(y_val)) > 1:
+            # Both train and val sets have multiple classes — safe to use early stopping.
+            # Use callback API (LightGBM >= 3.3); safe fallback is plain fit (no early stop).
             try:
                 from lightgbm import early_stopping as _es, log_evaluation as _le
                 model.fit(
@@ -257,10 +282,8 @@ class LGBMStrategy(BaseStrategy):
                     callbacks=[_es(50, verbose=False), _le(period=0)],
                 )
             except Exception:
-                model.fit(X_train, y_train,
-                          eval_set=[(X_val, y_val)],
-                          early_stopping_rounds=50,
-                          verbose=False)
+                # Fallback: train without early stopping (safe with any LightGBM version)
+                model.fit(X_train, y_train)
         else:
             model.fit(X_train, y_train)
 
@@ -376,6 +399,39 @@ class LGBMStrategy(BaseStrategy):
             )
 
     # ── Inference ─────────────────────────────────────────────────────────
+
+    def _horizon_sell(self, symbol: str, bar: Bar) -> Optional[Signal]:
+        """Return a SELL signal when the hold horizon has expired.
+
+        We only skip the forced exit if the model is STRONGLY bullish on the
+        current bar (p_buy >= 0.70).  In that case we extend the hold by another
+        forward_days and check again later.  Otherwise we close the position
+        unconditionally so the round-trip gets captured for WR/PF metrics.
+        """
+        ensemble = self._ensemble.get(symbol)
+        if ensemble:
+            bars = list(self._bar_buffer.get(symbol, []))
+            df   = bars_to_features(bars)
+            feat_cols = self._feat_cols.get(symbol, list(FEATURE_COLS))
+            if not df.empty and all(c in df.columns for c in feat_cols):
+                latest = df.iloc[[-1]][feat_cols]
+                all_probas = np.array([m.predict_proba(latest)[0] for m in ensemble])
+                avg_proba  = all_probas.mean(axis=0)
+                p_buy = float(avg_proba[1]) if len(avg_proba) >= 2 else float(avg_proba[0])
+                if p_buy >= 0.70:
+                    # Model still strongly bullish — extend hold by another window
+                    symbol_idx = self._bar_index.get(symbol, 0)
+                    self._last_buy_bar[symbol] = symbol_idx
+                    return None  # don't exit yet
+
+        # Exit: emit SELL to close the position and complete the round-trip
+        symbol_idx = self._bar_index.get(symbol, 0)
+        held = symbol_idx - self._last_buy_bar.get(symbol, 0)
+        self._last_buy_bar.pop(symbol, None)   # clear so we don't re-fire next bar
+        return self.make_signal(
+            symbol, SignalType.SELL, bar.close,
+            metadata={"reason": "horizon_exit", "held_bars": held},
+        )
 
     def _predict_signal(self, symbol: str, bar: Bar) -> Optional[Signal]:
         ensemble = self._ensemble.get(symbol)

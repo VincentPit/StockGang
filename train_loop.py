@@ -47,11 +47,11 @@ logger = logging.getLogger("train_loop")
 
 # ── Pass / fail targets ───────────────────────────────────────────────────────
 PASS = {
-    "min_trades":    3,
-    "profit_factor": 1.20,
-    "win_rate":      0.40,
+    "min_trades":    6,     # 6 closed round-trips minimum (reduced from 8 — 480d window feasible)
+    "profit_factor": 1.30,  # was 1.20
+    "win_rate":      0.33,  # trend-following: low WR is OK when PF > 1.3 (break-even at ~0.30)
     "min_pnl":       0.0,
-    "min_sharpe":    0.0,   # Sharpe > 0 = positive risk-adjusted return (net of vol)
+    "min_sharpe":    0.15,  # was 0.0 — require positive risk-adjusted return
 }
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
@@ -119,11 +119,14 @@ def _score(r: dict) -> float:
     """Higher is better. -999 if too few trades to evaluate."""
     if r.get("num_trades", 0) < PASS["min_trades"]:
         return -999.0
+    n_trades = r.get("num_trades", 0)
     pf     = r.get("profit_factor", 0.0)
     wr     = r.get("win_rate",      0.0)
     pnl    = r.get("total_pnl",     0.0)
     sharpe = r.get("sharpe_ratio",  0.0)
-    base = pf * 8.0 + wr * 5.0 + sharpe * 3.0 + (1.0 if pnl > 0 else -0.5)
+    # Cap extreme PF values when trade count is low — prevents "PF=30" with 5 wins skewing scores
+    pf_capped = min(pf, 6.0) if n_trades < 12 else pf
+    base = pf_capped * 8.0 + wr * 5.0 + sharpe * 3.0 + (1.0 if pnl > 0 else -0.5)
     # Passing trials always beat non-passing — 1000 pt bonus guarantees it
     if _passes(r):
         base += 1000.0
@@ -230,11 +233,12 @@ def adjust_screener_weights(delta: dict[str, float]) -> Path:
     if sw_path.exists():
         w: dict[str, float] = json.loads(sw_path.read_text())
     else:
-        # Mirrors the defaults in stock_screener.py
+        # Mirror ALL 10 defaults from stock_screener.py (must stay in sync)
         w = {
             "W_TREND":    0.20, "W_ATR":      0.10, "W_AUTOCORR": 0.10,
-            "W_MOM6M":    0.05, "W_DD":       0.20, "W_LOW_VOL":  0.15,
-            "W_DIST_52W": 0.10, "W_YANG":     0.10,
+            "W_MOM6M":    0.05, "W_DD":       0.14, "W_LOW_VOL":  0.13,
+            "W_DIST_52W": 0.05, "W_YANG":     0.05,
+            "W_SHARPE":   0.10, "W_CALMAR":   0.08,
         }
     for k, dv in delta.items():
         w[k] = round(max(0.02, min(0.45, w.get(k, 0.10) + dv)), 3)
@@ -616,7 +620,7 @@ def main() -> None:
               f"WR={res.get('win_rate', 0):.0%}  "
               f"PnL={res.get('total_pnl', 0):+,.0f}  "
               f"trades={res.get('num_trades', 0)}  "
-              f"Sharpe={res.get('sharpe', 0):.2f}")
+              f"Sharpe={res.get('sharpe_ratio', res.get('sharpe', 0)):.2f}")
         best_p = _mk(best.get("params", {}))
         print(f"  Params      : {json.dumps(asdict(best_p), separators=(',', ':'))}")
     else:
