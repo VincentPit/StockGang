@@ -458,6 +458,7 @@ def _train_loop_response(job: dict) -> TrainLoopResponse:
             total_pnl     = t.get("total_pnl"),
             profit_factor = t.get("profit_factor"),
             win_rate      = t.get("win_rate"),
+            sharpe_ratio  = t.get("sharpe_ratio"),
             num_trades    = t.get("num_trades"),
             error         = t.get("error"),
         ))
@@ -474,6 +475,7 @@ def _train_loop_response(job: dict) -> TrainLoopResponse:
         best_wr       = job.get("best_wr"),
         best_pnl      = job.get("best_pnl"),
         best_trades   = job.get("best_trades"),
+        best_sharpe   = job.get("best_sharpe"),
         symbols_tested= job.get("symbols_tested", []),
         all_trials    = trials,
         error         = job.get("error"),

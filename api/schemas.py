@@ -500,6 +500,7 @@ class TrainTrialRow(BaseModel):
     total_pnl:     Optional[float] = None
     profit_factor: Optional[float] = None
     win_rate:      Optional[float] = None
+    sharpe_ratio:  Optional[float] = None
     num_trades:    Optional[int]   = None
     error:         Optional[str]   = None
 
@@ -517,6 +518,7 @@ class TrainLoopResponse(BaseModel):
     best_wr:       Optional[float] = None
     best_pnl:      Optional[float] = None
     best_trades:   Optional[int]   = None
+    best_sharpe:   Optional[float] = None
     symbols_tested: list[str]      = []
     all_trials:    list[TrainTrialRow] = []
     error:         Optional[str]   = None

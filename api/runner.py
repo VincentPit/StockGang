@@ -219,12 +219,15 @@ def _backtest_core(symbols: list, req: dict) -> dict:
 
     lgbm = LGBMStrategy(
         strategy_id="lgbm_core", symbols=symbols,
-        forward_days=5, threshold=_bp.get("threshold", 0.015), train_ratio=0.70,
+        forward_days=_bp.get("forward_days", 5),
+        threshold=_bp.get("threshold", 0.015), train_ratio=0.70,
         min_confidence=_bp.get("min_confidence", 0.60),
         retrain_every=21, max_train_bars=504,
         use_macro=False, num_leaves=31, n_estimators=300,
         min_hold_bars=_bp.get("min_hold_bars", 5),
         commission_rate=req.get("commission_rate", _bp.get("commission_rate", 0.0003)),
+        horizon_exit=True,
+        horizon_mult=float(_bp.get("horizon_mult", 2.0)),
     )
     backtester = (
         Backtester(config)
@@ -640,6 +643,7 @@ def _run_train_loop_sync(jid: str, req: dict) -> None:
                 "total_pnl":     t["result"].get("total_pnl"),
                 "profit_factor": t["result"].get("profit_factor"),
                 "win_rate":      t["result"].get("win_rate"),
+                "sharpe_ratio":  t["result"].get("sharpe_ratio"),
                 "num_trades":    t["result"].get("num_trades"),
                 "error":         t.get("error"),
             }
@@ -662,6 +666,7 @@ def _run_train_loop_sync(jid: str, req: dict) -> None:
             "best_wr":       best_res.get("win_rate"),
             "best_pnl":      best_res.get("total_pnl"),
             "best_trades":   best_res.get("num_trades"),
+            "best_sharpe":   best_res.get("sharpe_ratio"),
             "symbols_tested":result.get("symbols_tested", []),
             "all_trials":    flat_trials,
         })
