@@ -302,15 +302,14 @@ def screen(
         return [], [], universe_size
 
     # ── Hard filter: post-pump reversal rejection ────────────────────────────────
-    # A stock with 1Y return > 100% that is now 20%+ off its 52-week peak is
-    # almost certainly a commodity/theme pump that has turned over.
-    # Example pattern: gold +120% YoY but now -35% from peak = pump-and-dump.
-    # These look attractive via dist_52w_high ("beaten down") but they're NOT
-    # value plays — they're momentum reversals. Hard filter them out.
+    # A stock with 1Y return > 100% that is now 10%+ off its 52-week peak is
+    # almost certainly a commodity/theme pump that has turned over or is topping out.
+    # 0.20 threshold was too loose: 天孚通信 +377% 1Y but only -16.5% off peak
+    # slipped through. Now 0.10: any 100%+ gainer more than 10% off peak is excluded.
     pump_excluded: list[str] = []
     pump_passed:   list[dict] = []
     for r in results:
-        if r.get("ret_1y", 0.0) > 1.0 and r.get("dist_52w_high", 0.0) > 0.20:
+        if r.get("ret_1y", 0.0) > 1.0 and r.get("dist_52w_high", 0.0) > 0.10:
             pump_excluded.append(
                 f"{r['sym']} (1Y +{r['ret_1y']:.0%}, {r['dist_52w_high']:.0%} off peak)"
             )
@@ -496,7 +495,7 @@ def screen(
             },
             {
                 "check":     "not_post_pump",
-                "label":     "Not a post-pump reversal (1Y≤100% OR ≤20% off peak)",
+                "label":     "Not a post-pump reversal (1Y≤100% OR ≤10% off peak)",
                 "threshold": None,
                 "actual":    round(r.get("ret_1y", 0), 4),
                 "passed":    True,
