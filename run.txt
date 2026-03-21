@@ -1,1 +1,1 @@
-lsof -ti:8000 | xargs kill -9 2>/dev/null; cd /Users/stephenlee/Desktop/MyQuant && source .venv/bin/activate && (uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload &) && cd web && npm run dev
+lsof -ti:8000 | xargs kill -9 2>/dev/null; lsof -ti:3000 | xargs kill -9 2>/dev/null; cd /Users/stephenlee/Desktop/MyQuant && source .venv/bin/activate && (uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload &) && cd web && npm run dev
