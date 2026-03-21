@@ -44,12 +44,19 @@ def _make_closes(n: int = 260, trend: str = "up") -> np.ndarray:
     if trend == "up":
         return 100.0 + np.arange(n, dtype=float) * 0.2
     elif trend == "gradual_up":
-        # Steady climb to a peak at 70% of history, then minor pullback.
-        # Final price is ~15% below the 52w high so it passes the near-52w-high filter.
-        peak_idx = int(n * 0.70)
-        rise  = 100.0 + np.arange(peak_idx, dtype=float) * 0.30
-        fall  = rise[-1] - np.arange(n - peak_idx, dtype=float) * 0.10
-        return np.concatenate([rise, fall])
+        # Three phases: steady climb (60%) → pullback (20%) → stabilise (20%).
+        # After _make_ohlcv_df injects a limit-up spike at bar n-30, the final
+        # stable tail keeps the current close above MA60, while price_52w_pct
+        # sits ≈ 75% (well below the 90% hot-stock cap).
+        rise_n   = int(n * 0.60)
+        fall_n   = int(n * 0.20)
+        stable_n = n - rise_n - fall_n
+        rise   = 100.0 + np.arange(rise_n,   dtype=float) * 0.30
+        peak   = float(rise[-1])
+        fall   = peak   - np.arange(fall_n,   dtype=float) * 0.20
+        trough = float(fall[-1])
+        stable = trough + np.arange(stable_n, dtype=float) * 0.05
+        return np.concatenate([rise, fall, stable])
     elif trend == "down":
         return 100.0 - np.arange(n, dtype=float) * 0.2
     else:  # flat
@@ -411,10 +418,14 @@ class TestGateChecks:
         _, results, _ = screen(top_n=1, min_bars=50, verbose=False)
         for r in results:
             for gate in r["gate_checks"]:
-                assert isinstance(gate["passed"],    bool)
-                assert isinstance(gate["threshold"], (int, float))
-                assert isinstance(gate["actual"],    (int, float))
-                assert isinstance(gate["note"],      str)
+                assert isinstance(gate["passed"], bool)
+                # threshold may be None for qualitative checks (e.g. above_ma60,
+                # not_post_pump) that have no single numeric cut-off
+                assert gate["threshold"] is None or isinstance(
+                    gate["threshold"], (int, float, str)
+                ), f"Bad threshold type {type(gate['threshold'])} in gate '{gate['check']}'"
+                assert isinstance(gate["actual"], (int, float, str))
+                assert isinstance(gate["note"],   str)
 
     def test_min_bars_gate_note_contains_bar_count(self):
         from myquant.tools.stock_screener import screen

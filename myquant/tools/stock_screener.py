@@ -110,6 +110,18 @@ def _fetch_and_score(sym, yf_tick, name, start_iso, end_iso, min_bars, n_score):
         # vol_60d: 60-day annualised daily return volatility (lower = more stable)
         vol_60d = float(np.std(rets[-60:]) * np.sqrt(252)) if len(rets) >= 60 else float(np.std(rets) * np.sqrt(252))
 
+        # ── Moving averages: are we currently in an uptrend? ──────────────────────
+        # MA60 filter: if price < 60-day MA, the stock is in a medium-term downtrend.
+        # Stocks that peaked and are now falling will fail this regardless of 1Y return.
+        ma20       = float(np.mean(closes[-20:])) if len(closes) >= 20 else closes[-1]
+        ma60       = float(np.mean(closes[-60:])) if len(closes) >= 60 else closes[-1]
+        above_ma20 = bool(closes[-1] >= ma20)
+        above_ma60 = bool(closes[-1] >= ma60)
+
+        # Recent return metrics (1M and 3M) — for display and post-pump filter
+        ret_1m = float((closes[-1] / closes[-20]  - 1) if len(closes) >= 20 else 0.0)
+        ret_3m = float((closes[-1] / closes[-63]  - 1) if len(closes) >= 63 else 0.0)
+
         # limit_up_60d: number of 涨停 days (≥9.5% daily gain) in last 60 bars
         # Non-zero = institutional presence (主力) confirmed; zero = stay away
         rets_60       = rets[-60:] if len(rets) >= 60 else rets
@@ -129,12 +141,18 @@ def _fetch_and_score(sym, yf_tick, name, start_iso, end_iso, min_bars, n_score):
             "bars":          len(df_s),
             "ret_1y":        (closes[-1] - closes[0]) / closes[0],
             "ret_6m":        (closes[-1] - closes[mid_idx]) / closes[mid_idx],
+            "ret_3m":        ret_3m,
+            "ret_1m":        ret_1m,
             "sharpe":        _sharpe(rets),
             "max_dd":        _max_drawdown(closes),
             "trend_pct":     _ma50_pct_above(closes),
             "atr_pct":       _atr_pct(closes, highs, lows),
             "autocorr":      _autocorr_lag1(rets),
             "last_close":    closes[-1],
+            "ma20":          round(ma20, 2),
+            "ma60":          round(ma60, 2),
+            "above_ma20":    above_ma20,
+            "above_ma60":    above_ma60,
             # Hot-stock guard metrics
             "ret_20d":        ret_20d,
             "price_52w_pct":  price_52w_pct,
@@ -261,6 +279,52 @@ def screen(
         if verbose:
             print("  All candidates excluded by no-主力 filter.")
         return [], [], universe_size
+
+    # ── Hard filter: current price must be above 60-day MA ──────────────────────
+    # A stock below MA60 is in a medium-term downtrend — it has peaked and is
+    # falling. The trend_pct score is HISTORICAL (looks at the full lookback window)
+    # and will still be high for a stock that went up 150% then crashed. The MA60
+    # filter catches what trend_pct misses: currently declining stocks.
+    ma_excluded: list[str] = []
+    ma_passed:   list[dict] = []
+    for r in results:
+        if not r.get("above_ma60", True):
+            ma_excluded.append(f"{r['sym']} (price {r['last_close']:.2f} < MA60 {r.get('ma60', 0):.2f})")
+        else:
+            ma_passed.append(r)
+    if verbose and ma_excluded:
+        print(f"  MA60 downtrend filter excluded {len(ma_excluded)}: {', '.join(ma_excluded[:6])}")
+    results = ma_passed
+
+    if not results:
+        if verbose:
+            print("  All candidates excluded by MA60 downtrend filter.")
+        return [], [], universe_size
+
+    # ── Hard filter: post-pump reversal rejection ────────────────────────────────
+    # A stock with 1Y return > 100% that is now 20%+ off its 52-week peak is
+    # almost certainly a commodity/theme pump that has turned over.
+    # Example pattern: gold +120% YoY but now -35% from peak = pump-and-dump.
+    # These look attractive via dist_52w_high ("beaten down") but they're NOT
+    # value plays — they're momentum reversals. Hard filter them out.
+    pump_excluded: list[str] = []
+    pump_passed:   list[dict] = []
+    for r in results:
+        if r.get("ret_1y", 0.0) > 1.0 and r.get("dist_52w_high", 0.0) > 0.20:
+            pump_excluded.append(
+                f"{r['sym']} (1Y +{r['ret_1y']:.0%}, {r['dist_52w_high']:.0%} off peak)"
+            )
+        else:
+            pump_passed.append(r)
+    if verbose and pump_excluded:
+        print(f"  Post-pump filter excluded {len(pump_excluded)}: {', '.join(pump_excluded[:6])}")
+    results = pump_passed
+
+    if not results:
+        if verbose:
+            print("  All candidates excluded by post-pump filter.")
+        return [], [], universe_size
+
     # Normalise each metric to [0, 1] across the scored universe
     def _minmax(vals):
         lo, hi = min(vals), max(vals)
@@ -422,9 +486,66 @@ def screen(
                 "passed":    True,
                 "note":      f"{r.get('limit_up_60d', 0)} limit-up day(s) in last 60 bars",
             },
+            {
+                "check":     "above_ma60",
+                "label":     "Price above 60-day MA (uptrend)",
+                "threshold": None,
+                "actual":    round(r.get("ma60", r["last_close"]), 2),
+                "passed":    True,
+                "note":      f"Close {r['last_close']:.2f} ≥ MA60 {r.get('ma60', r['last_close']):.2f}",
+            },
+            {
+                "check":     "not_post_pump",
+                "label":     "Not a post-pump reversal (1Y≤100% OR ≤20% off peak)",
+                "threshold": None,
+                "actual":    round(r.get("ret_1y", 0), 4),
+                "passed":    True,
+                "note":      f"1Y {r.get('ret_1y', 0):+.0%} · {r.get('dist_52w_high', 0):.0%} off peak",
+            },
         ]
 
     results.sort(key=lambda r: r["score"], reverse=True)
+
+    # ── Sector diversity cap: max 3 stocks per sector in the final top_n ────────────
+    # Prevents the screener from returning all metals/gold/aluminum stocks when
+    # a single commodity sector dominates the scoring in a given period.
+    # Uses keyword detection on Chinese names (most reliable without external API).
+    _SECTOR_KEYWORDS: dict[str, list[str]] = {
+        "aluminum": ["铝"],
+        "copper":   ["铜"],
+        "gold":     ["黄金", "金矿", "黄金"],
+        "steel":    ["钢", "锃铁"],
+        "coal":     ["煤", "焦炭"],
+        "oil_gas":  ["油", "石化", "天然气"],
+        "mining":   ["矿业", "矿"],
+        "bank":     ["银行"],
+        "insurance":["保险"],
+        "pharma":   ["医药", "制药", "生物"],
+        "ev":       ["动力电池", "新能源", "电动"],
+    }
+    def _infer_sector(name: str) -> str:
+        for sector, keywords in _SECTOR_KEYWORDS.items():
+            if any(kw in name for kw in keywords):
+                return sector
+        return "other"
+
+    MAX_PER_SECTOR = 3
+    sector_counts: dict[str, int] = {}
+    diversified: list[dict] = []
+    sector_capped: list[str] = []
+    for r in results:
+        sec = _infer_sector(r["name"])
+        r["_inferred_sector"] = sec
+        count = sector_counts.get(sec, 0)
+        if sec != "other" and count >= MAX_PER_SECTOR:
+            sector_capped.append(f"{r['sym']} ({sec})")
+        else:
+            sector_counts[sec] = count + 1
+            diversified.append(r)
+    if verbose and sector_capped:
+        print(f"  Sector cap (max {MAX_PER_SECTOR}/sector) dropped: {', '.join(sector_capped[:8])}")
+    results = diversified
+
     top_syms = [r["sym"] for r in results[:top_n]]
 
     if verbose:
