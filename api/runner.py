@@ -83,9 +83,9 @@ def list_jobs() -> list[dict[str, Any]]:
 def _run_backtest_sync(jid: str, req: dict) -> None:
     """Executed in a thread — thin wrapper around _backtest_core."""
     try:
-        _update_job(jid, {"status": "running"})
+        _update_job(jid, {"status": "running", "pct": 5, "step": "Loading price data…"})
         result = _backtest_core(req["symbols"], req)
-        _update_job(jid, {"status": "done", **result})
+        _update_job(jid, {"status": "done", "pct": 100, "step": "Done", **result})
     except Exception:
         tb = traceback.format_exc()
         _log.error("backtest job %s failed: %s", jid[:8], tb.splitlines()[-1])
@@ -100,9 +100,10 @@ async def launch_backtest(jid: str, req: dict) -> None:
 
 def _run_screener_sync(jid: str, req: dict) -> None:
     try:
-        _update_job(jid, {"status": "running"})
+        _update_job(jid, {"status": "running", "pct": 5, "step": "Fetching CSI universe…"})
         from myquant.tools.stock_screener import screen
 
+        _update_job(jid, {"pct": 20, "step": "Downloading price bars…"})
         top_syms, results, universe_size = screen(
             top_n=req["top_n"],
             min_bars=req["min_bars"],
@@ -110,6 +111,7 @@ def _run_screener_sync(jid: str, req: dict) -> None:
             indices=req.get("indices", ["000300"]),
             verbose=False,
         )
+        _update_job(jid, {"pct": 85, "step": "Scoring and ranking…"})
 
         rows = []
         for rank, r in enumerate(results, 1):
@@ -142,6 +144,8 @@ def _run_screener_sync(jid: str, req: dict) -> None:
 
         _update_job(jid, {
             "status":        "done",
+            "pct":           100,
+            "step":          "Done",
             "top_symbols":   top_syms,
             "rows":          rows,
             "universe_size": universe_size,
@@ -515,9 +519,10 @@ def _run_workflow_sync(jid: str, req: dict) -> None:
     """Screen for top stocks, then immediately backtest them."""
     try:
         # Phase 1 — screening
-        _update_job(jid, {"status": "screening"})
+        _update_job(jid, {"status": "screening", "pct": 5, "step": "Fetching CSI universe…"})
         from myquant.tools.stock_screener import screen
 
+        _update_job(jid, {"pct": 15, "step": "Downloading price bars…"})
         top_syms, results, universe_size = screen(
             top_n=req["top_n"],
             min_bars=req["min_bars"],
@@ -525,6 +530,7 @@ def _run_workflow_sync(jid: str, req: dict) -> None:
             indices=req.get("indices", ["000300"]),
             verbose=False,
         )
+        _update_job(jid, {"pct": 35, "step": "Scoring and ranking…"})
 
         screen_rows = []
         for rank, r in enumerate(results, 1):
@@ -560,12 +566,14 @@ def _run_workflow_sync(jid: str, req: dict) -> None:
         if not top_syms:
             _update_job(jid, {
                 "status": "done",
+                "pct": 100,
+                "step": "Done — no qualifying stocks found",
                 "error": "Screener found no qualifying stocks — try widening the universe or reducing min_bars.",
             })
             return
 
         # Phase 2 — backtesting the top picks
-        _update_job(jid, {"status": "backtesting"})
+        _update_job(jid, {"status": "backtesting", "pct": 40, "step": f"Backtesting {len(top_syms)} picks…"})
         backtest_req = {
             "lookback_days":   req["backtest_days"],
             "initial_cash":    req["initial_cash"],
@@ -576,7 +584,7 @@ def _run_workflow_sync(jid: str, req: dict) -> None:
             "take_profit_pct":   req.get("take_profit_pct", 0.0),
         }
         result = _backtest_core(top_syms, backtest_req)
-        _update_job(jid, {"status": "done", **result})
+        _update_job(jid, {"status": "done", "pct": 100, "step": "Done", **result})
 
     except Exception:
         tb = traceback.format_exc()
@@ -586,6 +594,80 @@ def _run_workflow_sync(jid: str, req: dict) -> None:
 
 async def launch_workflow(jid: str, req: dict) -> None:
     asyncio.get_running_loop().run_in_executor(_executor, _run_workflow_sync, jid, req)
+
+
+# ── train loop (screen → backtest → tune) ────────────────────────────────────
+
+def _run_train_loop_sync(jid: str, req: dict) -> None:
+    """Run the automated screen→backtest→tune loop in a background thread."""
+    try:
+        _update_job(jid, {"status": "running", "pct": 1, "step": "Initialising…"})
+
+        from train_loop import run_loop
+
+        def _cb(d: dict) -> None:
+            update: dict = {"status": "running"}
+            if "pct" in d:
+                update["pct"] = d["pct"]
+            if "step" in d:
+                update["step"] = d["step"]
+            _update_job(jid, update)
+
+        result = run_loop(
+            symbols      = req.get("symbols"),
+            top_n        = req.get("top_n", 3),
+            lookback_days= req.get("lookback_days", 180),
+            train_years  = req.get("train_years", 1),
+            configs      = req.get("configs", "fast"),
+            progress_cb  = _cb,
+        )
+
+        if "error" in result and not result.get("best"):
+            _update_job(jid, {"status": "error", "error": result["error"]})
+            return
+
+        best      = result.get("best") or {}
+        best_res  = best.get("result") or {}
+        # Flatten trial list for JSON storage (keep result sub-dict)
+        flat_trials = [
+            {
+                "symbol":        t["symbol"],
+                "config":        t["config"],
+                "passes":        t["passes"],
+                "score":         t["score"],
+                "elapsed_s":     t["elapsed_s"],
+                "total_pnl":     t["result"].get("total_pnl"),
+                "profit_factor": t["result"].get("profit_factor"),
+                "win_rate":      t["result"].get("win_rate"),
+                "num_trades":    t["result"].get("num_trades"),
+                "error":         t.get("error"),
+            }
+            for t in result.get("all_trials", [])
+        ]
+
+        _update_job(jid, {
+            "status":        "done",
+            "pct":           100,
+            "step":          "Done ✅" if result.get("found_passing") else "Done ⚠️ (no profitable config)",
+            "found_passing": result.get("found_passing", False),
+            "best_symbol":   best.get("symbol"),
+            "best_config":   best.get("config"),
+            "best_pf":       best_res.get("profit_factor"),
+            "best_wr":       best_res.get("win_rate"),
+            "best_pnl":      best_res.get("total_pnl"),
+            "best_trades":   best_res.get("num_trades"),
+            "symbols_tested":result.get("symbols_tested", []),
+            "all_trials":    flat_trials,
+        })
+
+    except Exception:
+        tb = traceback.format_exc()
+        _log.error("train_loop job %s failed: %s", jid[:8], tb.splitlines()[-1])
+        _update_job(jid, {"status": "error", "error": tb})
+
+
+async def launch_train_loop(jid: str, req: dict) -> None:
+    asyncio.get_running_loop().run_in_executor(_executor, _run_train_loop_sync, jid, req)
 
 
 # ── advisor: train ────────────────────────────────────────────────────────────

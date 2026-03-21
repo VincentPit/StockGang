@@ -73,6 +73,8 @@ class StrategyFills(BaseModel):
 class BacktestResponse(BaseModel):
     job_id: str
     status: str                          # "pending" | "running" | "done" | "error"
+    pct:    Optional[int]   = None       # 0–100 live progress
+    step:   Optional[str]  = None       # current step label
     # populated when status == "done"
     period_start: Optional[str] = None
     period_end: Optional[str] = None
@@ -150,6 +152,8 @@ class ScreenRow(BaseModel):
 class ScreenResponse(BaseModel):
     job_id: str
     status: str
+    pct:  Optional[int] = None   # 0–100 live progress
+    step: Optional[str] = None  # current step label
     top_symbols: list[str] = []
     rows: list[ScreenRow] = []
     universe_size: int = 0
@@ -264,6 +268,8 @@ class WorkflowRequest(BaseModel):
 class WorkflowResponse(BaseModel):
     job_id: str
     status: str                           # pending|screening|backtesting|done|error
+    pct:    Optional[int]  = None         # 0–100 live progress
+    step:   Optional[str]  = None         # current step label
     # ── Screener section ──────────────────────────────────────
     top_symbols: list[str] = []
     screen_rows: list[ScreenRow] = []
@@ -460,3 +466,56 @@ class AccountInfo(BaseModel):
     is_simulated:  bool
     broker_mode:   str   # "simulator" | "live"
     initial_cash:  float = 500_000.0
+
+
+# ── Train Loop ────────────────────────────────────────────────────────────────
+
+class TrainLoopRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    symbols:      Optional[list[str]] = None   # skip screener if provided
+    top_n:        int   = Field(default=3, ge=1, le=10)
+    lookback_days:int   = Field(default=180, ge=30, le=730)
+    train_years:  int   = Field(default=1, ge=1, le=3)
+    configs:      str   = Field(default="fast", pattern="^(fast|all)$")
+
+    @field_validator("symbols")
+    @classmethod
+    def symbols_sh_sz(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is None:
+            return v
+        cleaned = [s.strip().lower() for s in v if s.strip()]
+        bad = [s for s in cleaned if not (s.startswith("sh") or s.startswith("sz"))]
+        if bad:
+            raise ValueError(f"Only SH/SZ symbols supported. Bad: {bad}")
+        return cleaned or None
+
+
+class TrainTrialRow(BaseModel):
+    symbol:        str
+    config:        str
+    passes:        bool
+    score:         float
+    elapsed_s:     float
+    total_pnl:     Optional[float] = None
+    profit_factor: Optional[float] = None
+    win_rate:      Optional[float] = None
+    num_trades:    Optional[int]   = None
+    error:         Optional[str]   = None
+
+
+class TrainLoopResponse(BaseModel):
+    job_id:        str
+    status:        str           # pending|running|done|error
+    pct:           Optional[int]   = None
+    step:          Optional[str]   = None
+    found_passing: Optional[bool]  = None
+    best_symbol:   Optional[str]   = None
+    best_config:   Optional[str]   = None
+    best_pf:       Optional[float] = None
+    best_wr:       Optional[float] = None
+    best_pnl:      Optional[float] = None
+    best_trades:   Optional[int]   = None
+    symbols_tested: list[str]      = []
+    all_trials:    list[TrainTrialRow] = []
+    error:         Optional[str]   = None

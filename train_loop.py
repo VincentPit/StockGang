@@ -270,7 +270,142 @@ def _diagnose(trials: list[dict]) -> str:
     return "; ".join(issues) if issues else "unknown cause"
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# ── Programmatic entry-point (used by the API job runner) ────────────────────
+def run_loop(
+    symbols: list[str] | None = None,
+    top_n: int = 3,
+    lookback_days: int = 180,
+    train_years: int = 1,
+    configs: str = "fast",
+    progress_cb=None,          # callable({"pct": int, "step": str}) → None
+) -> dict:
+    """
+    Run the full training loop programmatically with optional progress reporting.
+
+    Returns a dict with keys:
+        found_passing, best, all_trials, diagnoses, symbols_tested, error
+    """
+    grid   = _GRID_FAST if configs == "fast" else _GRID_FULL
+    _emit  = progress_cb or (lambda d: None)
+
+    _emit({"pct": 2, "step": "Initialising train loop…"})
+
+    # ── Step 1: get symbols ───────────────────────────────────────────────────
+    screener_map: dict[str, dict] = {}
+    if symbols:
+        test_symbols = list(symbols)
+        _emit({"pct": 10, "step": f"Using {len(test_symbols)} symbol(s) from request"})
+    else:
+        _emit({"pct": 5, "step": "Screening live stocks…"})
+        from myquant.tools.stock_screener import screen
+        top_syms, all_results, _ = screen(
+            top_n=top_n, min_bars=200, lookback_years=1, verbose=False,
+        )
+        if not top_syms:
+            return {"error": "Screener returned 0 qualifying stocks — try widening the universe."}
+        test_symbols  = top_syms[:top_n]
+        screener_map  = {r["sym"]: r for r in all_results}
+        _emit({"pct": 15, "step": f"Screener done — top {len(test_symbols)}: {', '.join(test_symbols)}"})
+
+    # ── Step 2: parameter grid search ────────────────────────────────────────
+    n_total       = len(grid) * len(test_symbols)
+    all_trials: list[dict]    = []
+    best_score: float         = -float("inf")
+    best_trial: dict | None   = None
+    found_passing             = False
+    sym_diagnoses: list[str]  = []
+    trial_idx                 = 0
+
+    for symbol in test_symbols:
+        sym_trials: list[dict] = []
+
+        for cfg_name, overrides in grid:
+            pct_now = 15 + int(75 * trial_idx / max(n_total, 1))
+            _emit({"pct": pct_now, "step": f"{symbol} / {cfg_name}"})
+            p   = _mk(overrides)
+            t0  = time.time()
+            try:
+                res     = run_backtest(symbol, p, lookback_days, train_years)
+                elapsed = time.time() - t0
+                sc      = _score(res)
+                passes  = _passes(res)
+            except Exception as exc:
+                elapsed = time.time() - t0
+                trial = {
+                    "symbol": symbol, "config": cfg_name,
+                    "params": asdict(p), "result": {}, "score": -999.0,
+                    "passes": False, "elapsed_s": round(elapsed, 1),
+                    "error": str(exc),
+                }
+                all_trials.append(trial)
+                sym_trials.append(trial)
+                trial_idx += 1
+                continue
+
+            trial = {
+                "symbol":    symbol,
+                "config":    cfg_name,
+                "params":    asdict(p),
+                "result":    res,
+                "score":     round(sc, 3),
+                "passes":    passes,
+                "elapsed_s": round(elapsed, 1),
+            }
+            all_trials.append(trial)
+            sym_trials.append(trial)
+
+            if sc > best_score:
+                best_score = sc
+                best_trial = trial
+            if passes:
+                found_passing = True
+            trial_idx += 1
+
+        diag = _diagnose(sym_trials)
+        sym_diagnoses.append(f"{symbol}: {diag}")
+
+        if found_passing:
+            _emit({"pct": 88, "step": f"✅ Found passing config — skipping remaining symbols"})
+            break
+
+    # ── Step 3: apply & persist ───────────────────────────────────────────────
+    _emit({"pct": 92, "step": "Saving best params…"})
+
+    if best_trial is None:
+        return {"error": "All trials crashed. Check symbol data availability.", "all_trials": all_trials}
+
+    best_p = _mk(best_trial["params"])
+    res    = best_trial["result"]
+    save_best_params(best_p, best_trial["symbol"], res)
+
+    if not found_passing:
+        adjust_screener_weights({
+            "W_MOM6M": -0.02, "W_AUTOCORR": -0.02,
+            "W_DD":    +0.02, "W_LOW_VOL":  +0.02,
+        })
+
+    # Full trial log
+    log_path = ROOT / "train_loop_results.json"
+    log_path.write_text(json.dumps({
+        "run_at":         datetime.now().isoformat(),
+        "symbols_tested": test_symbols,
+        "found_passing":  found_passing,
+        "best":           best_trial,
+        "all_trials":     all_trials,
+        "diagnoses":      sym_diagnoses,
+    }, indent=2, default=str))
+
+    _emit({"pct": 100, "step": "Done ✅" if found_passing else "Done ⚠️ (no profitable config)"})
+    return {
+        "found_passing":  found_passing,
+        "best":           best_trial,
+        "all_trials":     all_trials,
+        "diagnoses":      sym_diagnoses,
+        "symbols_tested": test_symbols,
+    }
+
+
+# ── CLI entry-point ──────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="Automated screen → backtest → tune loop")
     parser.add_argument("--symbol",   nargs="*", default=None,

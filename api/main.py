@@ -78,8 +78,11 @@ from api.schemas import (
     RegimeResponse,
     ScreenRequest,
     ScreenResponse,
+    TrainLoopRequest,
+    TrainLoopResponse,
     TrainRequest,
     TrainResponse,
+    TrainTrialRow,
     UniverseResponse,
     WorkflowRequest,
     WorkflowResponse,
@@ -96,6 +99,7 @@ from api.runner import (
     launch_recommend,
     launch_screener,
     launch_train,
+    launch_train_loop,
     launch_workflow,
     list_jobs,
     new_job,
@@ -146,6 +150,7 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
         "/api/workflow",
         "/api/advisor/train",
         "/api/advisor/analyze",
+        "/api/train-loop",
     })
 
     def __init__(self, app) -> None:
@@ -364,7 +369,12 @@ async def ws_progress(websocket: WebSocket, job_id: str):
                 await websocket.send_json({"status": "error", "error": safe_err})
                 break
             else:
-                await websocket.send_json({"status": status})
+                msg: dict = {"status": status}
+                if job.get("pct") is not None:
+                    msg["pct"] = job["pct"]
+                if job.get("step"):
+                    msg["step"] = job["step"]
+                await websocket.send_json(msg)
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         pass
@@ -376,6 +386,8 @@ def _backtest_response(job: dict) -> BacktestResponse:
     return BacktestResponse(
         job_id          = job["id"],
         status          = job["status"],
+        pct             = job.get("pct"),
+        step            = job.get("step"),
         period_start    = job.get("period_start"),
         period_end      = job.get("period_end"),
         symbols         = job.get("symbols", []),
@@ -402,9 +414,67 @@ def _screen_response(job: dict) -> ScreenResponse:
     return ScreenResponse(
         job_id        = job["id"],
         status        = job["status"],
+        pct           = job.get("pct"),
+        step          = job.get("step"),
         top_symbols   = job.get("top_symbols", []),
         rows          = job.get("rows", []),
         universe_size = job.get("universe_size", 0),
+        error         = job.get("error"),
+    )
+
+
+# ── Train Loop (screen → backtest → tune) ───────────────────────────────────
+
+@app.post("/api/train-loop", response_model=TrainLoopResponse, status_code=202)
+async def start_train_loop(req: TrainLoopRequest):
+    """
+    Launch the automated screen→backtest→tune feedback loop as a background job.
+    Poll GET /api/train-loop/{job_id} for live progress (pct + step).
+    """
+    jid = new_job("train_loop")
+    await launch_train_loop(jid, req.model_dump())
+    return TrainLoopResponse(job_id=jid, status="pending")
+
+
+@app.get("/api/train-loop/{job_id}", response_model=TrainLoopResponse)
+async def get_train_loop(job_id: str):
+    """Poll a train-loop job by ID."""
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _train_loop_response(job)
+
+
+def _train_loop_response(job: dict) -> TrainLoopResponse:
+    raw_trials = job.get("all_trials", [])
+    trials = []
+    for t in raw_trials:
+        trials.append(TrainTrialRow(
+            symbol        = t.get("symbol", ""),
+            config        = t.get("config", ""),
+            passes        = bool(t.get("passes")),
+            score         = float(t.get("score", -999)),
+            elapsed_s     = float(t.get("elapsed_s", 0)),
+            total_pnl     = t.get("total_pnl"),
+            profit_factor = t.get("profit_factor"),
+            win_rate      = t.get("win_rate"),
+            num_trades    = t.get("num_trades"),
+            error         = t.get("error"),
+        ))
+    return TrainLoopResponse(
+        job_id        = job["id"],
+        status        = job["status"],
+        pct           = job.get("pct"),
+        step          = job.get("step"),
+        found_passing = job.get("found_passing"),
+        best_symbol   = job.get("best_symbol"),
+        best_config   = job.get("best_config"),
+        best_pf       = job.get("best_pf"),
+        best_wr       = job.get("best_wr"),
+        best_pnl      = job.get("best_pnl"),
+        best_trades   = job.get("best_trades"),
+        symbols_tested= job.get("symbols_tested", []),
+        all_trials    = trials,
         error         = job.get("error"),
     )
 
@@ -430,6 +500,8 @@ def _workflow_response(job: dict) -> WorkflowResponse:
     return WorkflowResponse(
         job_id        = job["id"],
         status        = job["status"],
+        pct           = job.get("pct"),
+        step          = job.get("step"),
         top_symbols   = job.get("top_symbols", []),
         screen_rows   = job.get("screen_rows", []),
         period_start  = job.get("period_start"),
