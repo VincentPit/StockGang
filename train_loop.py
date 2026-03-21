@@ -50,7 +50,9 @@ PASS = {
     "min_trades":    3,
     "profit_factor": 1.20,
     "win_rate":      0.40,
-    "min_pnl":       0.0,    "min_sharpe":    0.0,   # Sharpe > 0 = positive risk-adjusted return (net of vol)}
+    "min_pnl":       0.0,
+    "min_sharpe":    0.0,   # Sharpe > 0 = positive risk-adjusted return (net of vol)
+}
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 @dataclass
@@ -411,195 +413,231 @@ def run_loop(
     }
 
 
+# ── Autonomous self-test / retry ladder ─────────────────────────────────────
+# Each rung escalates: more backtest data, longer LGBM warm-up, more symbols.
+# Screener weights are nudged (scaled up each round) toward safety on failure.
+_RETRY_LADDER: list[dict] = [
+    # Round 1: Quick baseline — fast grid, 180d test window, 1yr training
+    {"lookback_days": 180, "train_years": 1, "top_n_mult": 1, "configs": "fast"},
+    # Round 2: Full grid, 360d window (captures a full market cycle)
+    {"lookback_days": 360, "train_years": 1, "top_n_mult": 1, "configs": "all"},
+    # Round 3: 2yr training warm-up (more history → better LGBM generalisation)
+    {"lookback_days": 360, "train_years": 2, "top_n_mult": 1, "configs": "all"},
+    # Round 4: 2× screener candidates (wider stock search)
+    {"lookback_days": 365, "train_years": 2, "top_n_mult": 2, "configs": "all"},
+    # Round 5: Maximum data — 3yr training, 540d window, 3× stock candidates
+    {"lookback_days": 540, "train_years": 3, "top_n_mult": 3, "configs": "all"},
+]
+
+
+def self_test_loop(
+    symbols: list[str] | None = None,
+    top_n: int = 3,
+    max_rounds: int = 5,
+    progress_cb=None,
+) -> dict:
+    """
+    Autonomous screen → backtest → tune loop with escalating retry strategies.
+
+    Wraps ``run_loop()`` and automatically escalates through ``_RETRY_LADDER``
+    until a passing config is found or all rounds are exhausted.  On each
+    failed round the screener weights are nudged toward safety (drawdown
+    penalty up, momentum weight down) — no human re-run required.
+
+    Parameters
+    ----------
+    symbols :
+        If given, skip the screener and test these symbols on every round.
+    top_n :
+        Number of screener picks in round 1; later rounds multiply by
+        ``_RETRY_LADDER[i]["top_n_mult"]`` so the search widens automatically.
+    max_rounds :
+        Cap at this many rounds (capped at ``len(_RETRY_LADDER)`` = 5).
+    progress_cb :
+        Optional ``callable({"pct": int, "step": str}) → None``.
+
+    Returns the same dict shape as ``run_loop()`` with two extra keys:
+        ``rounds_run``  — how many rounds were actually executed
+        ``all_rounds``  — per-round result dicts (list of ``run_loop`` returns)
+    """
+    _emit  = progress_cb or (lambda _: None)
+    rounds = _RETRY_LADDER[:max(1, min(max_rounds, len(_RETRY_LADDER)))]
+    n      = len(rounds)
+
+    all_rounds: list[dict]    = []
+    best_overall: dict | None = None
+    best_score_overall: float = -float("inf")
+
+    for idx, rung in enumerate(rounds):
+        round_num       = idx + 1
+        effective_top_n = top_n * rung["top_n_mult"]
+        pct_base        = int(idx / n * 88)
+
+        _emit({
+            "pct":  pct_base,
+            "step": (
+                f"🔁 Round {round_num}/{n} — "
+                f"lookback={rung['lookback_days']}d  "
+                f"train={rung['train_years']}yr  "
+                f"grid={rung['configs']}  "
+                f"top_n={effective_top_n}"
+            ),
+        })
+        logger.info(
+            "self_test_loop round %d/%d  lookback=%d  train=%d  configs=%s  top_n=%d",
+            round_num, n,
+            rung["lookback_days"], rung["train_years"],
+            rung["configs"], effective_top_n,
+        )
+
+        result = run_loop(
+            symbols      =symbols,
+            top_n        =effective_top_n,
+            lookback_days=rung["lookback_days"],
+            train_years  =rung["train_years"],
+            configs      =rung["configs"],
+            progress_cb  =None,   # suppress nested progress; we own the gauge
+        )
+
+        result["_round"] = round_num
+        result["_rung"]  = rung
+        all_rounds.append(result)
+
+        # Track best trial seen across ALL rounds
+        best = result.get("best")
+        if best:
+            sc = _score(best.get("result", {}))
+            if sc > best_score_overall:
+                best_score_overall = sc
+                best_overall       = best
+
+        # ── Success path ──────────────────────────────────────────────────────
+        if result.get("found_passing"):
+            _emit({"pct": 100, "step": f"✅ Passed on round {round_num}/{n}"})
+            logger.info("self_test_loop: passed on round %d", round_num)
+            return {
+                "found_passing":  True,
+                "rounds_run":     round_num,
+                "best":           best_overall,
+                "all_rounds":     all_rounds,
+                "diagnoses":      result.get("diagnoses", []),
+                "symbols_tested": result.get("symbols_tested", []),
+            }
+
+        # ── Failed round: diagnose → nudge screener → escalate ────────────────
+        diag = result.get("diagnoses", [])
+        logger.warning("self_test_loop round %d failed: %s", round_num, diag)
+        _emit({
+            "pct":  pct_base + int(88 / n * 0.9),
+            "step": (
+                f"  ↳ round {round_num} failed "
+                f"({'; '.join(str(d) for d in diag[:2]) if diag else 'no diagnosis'})"
+                "  — escalating…"
+            ),
+        })
+
+        # Nudge screener weights (scale ×1.0, ×1.5, ×2.0, ×2.5, ×3.0 per round)
+        scale = 1.0 + idx * 0.5
+        adjust_screener_weights({
+            "W_MOM6M":    round(-0.02 * scale, 4),
+            "W_AUTOCORR": round(-0.01 * scale, 4),
+            "W_DD":       round(+0.02 * scale, 4),
+            "W_LOW_VOL":  round(+0.01 * scale, 4),
+        })
+
+    # ── All rounds exhausted ──────────────────────────────────────────────────
+    _emit({"pct": 100, "step": f"⚠️ All {n} rounds exhausted — best available config applied"})
+    logger.warning("self_test_loop: all %d rounds exhausted", n)
+    last = all_rounds[-1] if all_rounds else {}
+    return {
+        "found_passing":  False,
+        "rounds_run":     n,
+        "best":           best_overall,
+        "all_rounds":     all_rounds,
+        "diagnoses":      last.get("diagnoses", []),
+        "symbols_tested": last.get("symbols_tested", []),
+    }
+
+
 # ── CLI entry-point ──────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="Automated screen → backtest → tune loop")
-    parser.add_argument("--symbol",   nargs="*", default=None,
+    parser.add_argument("--symbol",  nargs="*", default=None,
                         help="Skip screener; test these specific symbols")
-    parser.add_argument("--top",      type=int,  default=3,
-                        help="Top N stocks to pull from screener (default: 3)")
-    parser.add_argument("--lookback", type=int,  default=180,
-                        help="Backtest test window in calendar days (default: 180)")
-    parser.add_argument("--train",    type=int,  default=1,
-                        help="ML warm-up years before test window (default: 1)")
-    parser.add_argument("--configs",  choices=["fast", "all"], default="fast",
-                        help="Parameter grid size: fast=8, all=13 (default: fast)")
+    parser.add_argument("--top",     type=int,  default=3,
+                        help="Top-N stocks from screener (round 1; auto-expands in later rounds)")
+    parser.add_argument("--rounds",  type=int,  default=5,
+                        help="Max self-test rounds before giving up (default: 5)")
     args = parser.parse_args()
-
-    grid = _GRID_FAST if args.configs == "fast" else _GRID_FULL
 
     _w = "=" * 66
     print(f"\n{_w}")
-    print("  TRAIN LOOP  —  screen → backtest → tune → apply")
+    print("  SELF-TEST TRAIN LOOP  —  screen → backtest → tune → auto-retry")
     print(_w)
     print(f"  Pass criteria : PF ≥ {PASS['profit_factor']:.2f}  |  "
-          f"WR ≥ {PASS['win_rate']:.0%}  |  PnL > 0  |  trades ≥ {PASS['min_trades']}")
-    print(f"  Grid size     : {len(grid)} configs  ({args.configs})")
-    print(f"  Test window   : {args.lookback}d  |  Warm-up : {args.train}yr")
+          f"WR ≥ {PASS['win_rate']:.0%}  |  PnL > 0  |  trades ≥ {PASS['min_trades']}  |  "
+          f"Sharpe ≥ {PASS['min_sharpe']:.1f}")
+    print(f"  Max rounds    : {args.rounds}  "
+          f"({'specific symbols' if args.symbol else f'top-{args.top} from screener, auto-expands'})")
+    print()
 
-    # ── Step 1: get symbols ───────────────────────────────────────────────────
-    screener_map: dict[str, dict] = {}   # symbol → screener result row
-    if args.symbol:
-        test_symbols = args.symbol
-        print(f"\n[1/3] Symbols (CLI): {test_symbols}")
-    else:
-        print("\n[1/3] Running live screener…")
-        from myquant.tools.stock_screener import screen
-        top_syms, all_results, universe_size = screen(
-            top_n=args.top,
-            min_bars=200,
-            lookback_years=1,
-            verbose=True,
-        )
-        if not top_syms:
-            print("  ERROR: screener returned 0 qualifying stocks. Exiting.")
-            sys.exit(1)
-        test_symbols = top_syms[: args.top]
-        screener_map = {r["sym"]: r for r in all_results}
-        print(f"\n  Top {len(test_symbols)} stocks: {test_symbols}")
+    def _cb(d: dict) -> None:
+        step = d.get("step", "")
+        pct  = d.get("pct")
+        if step:
+            prefix = f"  [{pct:>3}%] " if pct is not None else "         "
+            print(prefix + step)
 
-    # ── Step 2: parameter grid search ────────────────────────────────────────
-    n_total = len(grid) * len(test_symbols)
-    print(f"\n[2/3] Running {n_total} trials "
-          f"({len(grid)} configs × {len(test_symbols)} symbols)…\n")
+    result = self_test_loop(
+        symbols    =args.symbol,
+        top_n      =args.top,
+        max_rounds =args.rounds,
+        progress_cb=_cb,
+    )
 
-    all_trials: list[dict]  = []
-    best_score: float       = -float("inf")
-    best_trial: Optional[dict] = None
-    found_passing           = False
-    sym_diagnoses: list[str] = []
-
-    for sym_idx, symbol in enumerate(test_symbols):
-        sr = screener_map.get(symbol, {})
-        label = (
-            f"{symbol}  ({sr.get('name', '')}  score={sr.get('score', 0):.3f})"
-            if sr else symbol
-        )
-        print(f"  ── Stock #{sym_idx + 1}: {label}")
-
-        sym_trials: list[dict] = []
-
-        for cfg_name, overrides in grid:
-            p = _mk(overrides)
-            t0 = time.time()
-            sys.stdout.write(f"    [{cfg_name:<20}] … ")
-            sys.stdout.flush()
-
-            try:
-                res     = run_backtest(symbol, p, args.lookback, args.train)
-                elapsed = time.time() - t0
-                sc      = _score(res)
-                passes  = _passes(res)
-            except Exception as exc:
-                elapsed = time.time() - t0
-                print(f"ERROR ({exc})")
-                trial = {
-                    "symbol": symbol, "config": cfg_name,
-                    "params": asdict(p), "result": {}, "score": -999.0,
-                    "passes": False, "elapsed_s": round(elapsed, 1),
-                    "error": str(exc),
-                }
-                all_trials.append(trial)
-                sym_trials.append(trial)
-                continue
-
-            status = "✅ PASS" if passes else ("⚡ ok  " if sc > 5 else "❌    ")
-            print(
-                f"{status}  "
-                f"PF={res['profit_factor']:.3f}  "
-                f"WR={res['win_rate']:.0%}  "
-                f"PnL={res['total_pnl']:>+10,.0f}  "
-                f"T={res['num_trades']:>3}  "
-                f"({elapsed:.0f}s)"
-            )
-
-            trial = {
-                "symbol":    symbol,
-                "config":    cfg_name,
-                "params":    asdict(p),
-                "result":    res,
-                "score":     round(sc, 3),
-                "passes":    passes,
-                "elapsed_s": round(elapsed, 1),
-            }
-            all_trials.append(trial)
-            sym_trials.append(trial)
-
-            if sc > best_score:
-                best_score = sc
-                best_trial = trial
-
-            if passes:
-                found_passing = True
-
-        diag = _diagnose(sym_trials)
-        sym_diagnoses.append(f"{symbol}: {diag}")
-        print()
-
-        # Stop as soon as the first profitable config is found on the #1 stock.
-        # For stocks #2+, stop as soon as any config passes.
-        if found_passing:
-            print(f"  ✅ Found passing config — skipping remaining symbols.\n")
-            break
-
-    # ── Step 3: apply & persist ───────────────────────────────────────────────
-    print("[3/3] Applying results…\n")
-
-    if best_trial is None:
-        print("  ERROR: all trials crashed. Check for import errors.")
-        sys.exit(1)
-
-    best_p = _mk(best_trial["params"])
-    res    = best_trial["result"]
-
-    print(f"  Best trial  : {best_trial['symbol']}  /  {best_trial['config']}")
-    print(f"  Score       : {best_trial['score']:.2f}  "
-          f"{'✅ PASS' if best_trial['passes'] else '⚠️  not profitable (best available)'}")
-    print(f"  Metrics     : PF={res.get('profit_factor', 0):.3f}  "
-          f"WR={res.get('win_rate', 0):.0%}  "
-          f"PnL={res.get('total_pnl', 0):+,.0f}  "
-          f"trades={res.get('num_trades', 0)}")
-    print(f"  Params      : {json.dumps(asdict(best_p), separators=(',', ':'))}")
-
-    bp_path = save_best_params(best_p, best_trial["symbol"], res)
-    print(f"\n  ✓ Saved → {bp_path.name}")
-    print(f"    api/runner.py auto-loads this on every subsequent backtest.")
-
-    # If no config was profitable, nudge screener weights and report
-    if not found_passing:
-        print("\n  ⚠️  No config was profitable across all tested stocks.")
-        print("  Diagnosis:")
-        for d in sym_diagnoses:
-            print(f"    {d}")
-        print("\n  Nudging screener weights: ↑ safety  ↓ momentum…")
-        sw_path = adjust_screener_weights({
-            "W_MOM6M":    -0.02,   # 6-month momentum → reduce (rewards hot stocks)
-            "W_AUTOCORR": -0.02,   # autocorrelation  → reduce (same issue)
-            "W_DD":       +0.02,   # max-drawdown penalty → increase
-            "W_LOW_VOL":  +0.02,   # stability reward → increase
-        })
-        print(f"  ✓ Saved → {sw_path.name}")
-        print(f"    Re-run train_loop.py to search with re-weighted screener.")
-
-    # Save full trial log
-    log_path = ROOT / "train_loop_results.json"
-    log_path.write_text(json.dumps({
-        "run_at":          datetime.now().isoformat(),
-        "symbols_tested":  test_symbols,
-        "found_passing":   found_passing,
-        "best":            best_trial,
-        "all_trials":      all_trials,
-        "diagnoses":       sym_diagnoses,
-    }, indent=2, default=str))
-    print(f"  ✓ Full log  → {log_path.name}")
+    # ── Final summary ─────────────────────────────────────────────────────────
+    best   = result.get("best") or {}
+    res    = best.get("result") or {}
+    found  = result.get("found_passing", False)
+    n_done = result.get("rounds_run", 0)
 
     print(f"\n{_w}")
-    if found_passing:
-        print(f"  ✅ Done — profitable config found and applied.")
-        print(f"     Backtest {best_trial['symbol']} in the UI to verify.")
+    if found:
+        print(f"  ✅ PASSED  after {n_done} round(s)")
     else:
-        print(f"  ⚠️  Done — best available (not profitable) config applied.")
-        print(f"     Screener weights nudged. Re-run train_loop.py to retry.")
+        print(f"  ⚠️  All {n_done} round(s) exhausted — best available config applied")
+
+    if best:
+        print(f"\n  Best trial  : {best.get('symbol')}  /  {best.get('config')}")
+        print(f"  Score       : {best.get('score', 0):.2f}  "
+              f"({'PASS' if best.get('passes') else 'not profitable'})")
+        print(f"  Metrics     : "
+              f"PF={res.get('profit_factor', 0):.3f}  "
+              f"WR={res.get('win_rate', 0):.0%}  "
+              f"PnL={res.get('total_pnl', 0):+,.0f}  "
+              f"trades={res.get('num_trades', 0)}  "
+              f"Sharpe={res.get('sharpe', 0):.2f}")
+        best_p = _mk(best.get("params", {}))
+        print(f"  Params      : {json.dumps(asdict(best_p), separators=(',', ':'))}")
+    else:
+        print("\n  ERROR: no trials completed. Check logs for data/import errors.")
+
+    if result.get("diagnoses"):
+        print("\n  Diagnosis:")
+        for d in result.get("diagnoses", []):
+            print(f"    {d}")
+
+    # ── Save full self-test results log ───────────────────────────────────────
+    log_path = ROOT / "self_test_results.json"
+    log_path.write_text(json.dumps({
+        "run_at":        datetime.now().isoformat(),
+        "found_passing": found,
+        "rounds_run":    n_done,
+        "best":          best,
+        "all_rounds":    result.get("all_rounds", []),
+        "diagnoses":     result.get("diagnoses", []),
+    }, indent=2, default=str))
+    print(f"\n  ✓ Full log  → {log_path.name}")
     print(f"{_w}\n")
 
 

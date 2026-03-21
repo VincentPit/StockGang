@@ -603,7 +603,7 @@ def _run_train_loop_sync(jid: str, req: dict) -> None:
     try:
         _update_job(jid, {"status": "running", "pct": 1, "step": "Initialising…"})
 
-        from train_loop import run_loop
+        from train_loop import self_test_loop
 
         def _cb(d: dict) -> None:
             update: dict = {"status": "running"}
@@ -613,13 +613,11 @@ def _run_train_loop_sync(jid: str, req: dict) -> None:
                 update["step"] = d["step"]
             _update_job(jid, update)
 
-        result = run_loop(
-            symbols      = req.get("symbols"),
-            top_n        = req.get("top_n", 3),
-            lookback_days= req.get("lookback_days", 180),
-            train_years  = req.get("train_years", 1),
-            configs      = req.get("configs", "fast"),
-            progress_cb  = _cb,
+        result = self_test_loop(
+            symbols    = req.get("symbols"),
+            top_n      = req.get("top_n", 3),
+            max_rounds = req.get("max_rounds", 5),
+            progress_cb= _cb,
         )
 
         if "error" in result and not result.get("best"):
@@ -628,7 +626,10 @@ def _run_train_loop_sync(jid: str, req: dict) -> None:
 
         best      = result.get("best") or {}
         best_res  = best.get("result") or {}
-        # Flatten trial list for JSON storage (keep result sub-dict)
+        # Flatten trial list across all rounds for JSON storage
+        _raw_trials: list[dict] = []
+        for rnd in result.get("all_rounds", []):
+            _raw_trials.extend(rnd.get("all_trials", []))
         flat_trials = [
             {
                 "symbol":        t["symbol"],
@@ -642,14 +643,19 @@ def _run_train_loop_sync(jid: str, req: dict) -> None:
                 "num_trades":    t["result"].get("num_trades"),
                 "error":         t.get("error"),
             }
-            for t in result.get("all_trials", [])
+            for t in _raw_trials
         ]
 
         _update_job(jid, {
             "status":        "done",
             "pct":           100,
-            "step":          "Done ✅" if result.get("found_passing") else "Done ⚠️ (no profitable config)",
+            "step":          (
+                f"Done ✅ (passed in {result.get('rounds_run', 1)} round(s))"
+                if result.get("found_passing")
+                else f"Done ⚠️ (exhausted {result.get('rounds_run', '?')} round(s), best available applied)"
+            ),
             "found_passing": result.get("found_passing", False),
+            "rounds_run":    result.get("rounds_run", 1),
             "best_symbol":   best.get("symbol"),
             "best_config":   best.get("config"),
             "best_pf":       best_res.get("profit_factor"),
