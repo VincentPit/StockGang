@@ -50,8 +50,7 @@ PASS = {
     "min_trades":    3,
     "profit_factor": 1.20,
     "win_rate":      0.40,
-    "min_pnl":       0.0,
-}
+    "min_pnl":       0.0,    "min_sharpe":    0.0,   # Sharpe > 0 = positive risk-adjusted return (net of vol)}
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 @dataclass
@@ -79,6 +78,10 @@ _GRID_FAST: list[tuple[str, dict]] = [
     ("trailing_06",    {"trailing_stop_pct": 0.06}),
     ("take_profit_12", {"take_profit_pct": 0.12}),
     ("safe_combo",     {"min_confidence": 0.65, "threshold": 0.020, "trailing_stop_pct": 0.06}),
+    # Longer horizon: 10-day label is less noisy on slow-moving quality stocks
+    ("fwd10",          {"forward_days": 10, "threshold": 0.020, "min_hold_bars": 8}),
+    # Lower bar: more trades generated — helps when model is right but cautious
+    ("low_conf",       {"min_confidence": 0.55, "min_hold_bars": 8}),
 ]
 
 _GRID_FULL: list[tuple[str, dict]] = _GRID_FAST + [
@@ -88,6 +91,10 @@ _GRID_FULL: list[tuple[str, dict]] = _GRID_FAST + [
     ("trailing_10",    {"trailing_stop_pct": 0.10}),
     ("ultra_combo",    {"min_confidence": 0.70, "threshold": 0.020, "trailing_stop_pct": 0.08,
                         "take_profit_pct": 0.15}),
+    ("fwd10_strict",   {"forward_days": 10, "threshold": 0.025, "min_confidence": 0.65,
+                        "min_hold_bars": 10}),
+    ("tp_trail_combo", {"take_profit_pct": 0.10, "trailing_stop_pct": 0.07,
+                        "min_confidence": 0.60}),
 ]
 
 
@@ -102,6 +109,7 @@ def _passes(r: dict) -> bool:
         and r.get("profit_factor", 0) >= PASS["profit_factor"]
         and r.get("win_rate",      0) >= PASS["win_rate"]
         and r.get("total_pnl",     0) >  PASS["min_pnl"]
+        and r.get("sharpe_ratio",  0) >= PASS["min_sharpe"]
     )
 
 
@@ -109,10 +117,11 @@ def _score(r: dict) -> float:
     """Higher is better. -999 if too few trades to evaluate."""
     if r.get("num_trades", 0) < PASS["min_trades"]:
         return -999.0
-    pf  = r.get("profit_factor", 0.0)
-    wr  = r.get("win_rate",      0.0)
-    pnl = r.get("total_pnl",     0.0)
-    base = pf * 10.0 + wr * 5.0 + (1.0 if pnl > 0 else -0.5)
+    pf     = r.get("profit_factor", 0.0)
+    wr     = r.get("win_rate",      0.0)
+    pnl    = r.get("total_pnl",     0.0)
+    sharpe = r.get("sharpe_ratio",  0.0)
+    base = pf * 8.0 + wr * 5.0 + sharpe * 3.0 + (1.0 if pnl > 0 else -0.5)
     # Passing trials always beat non-passing — 1000 pt bonus guarantees it
     if _passes(r):
         base += 1000.0
@@ -128,9 +137,6 @@ def run_backtest(symbol: str, p: Params, lookback_days: int, train_years: int) -
     from myquant.backtest.simulator import Backtester, BacktestConfig
     from myquant.models.bar import BarInterval
     from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
-    from myquant.strategy.technical.ma_crossover import MACrossoverStrategy
-    from myquant.strategy.technical.macd_strategy import MACDStrategy
-    from myquant.strategy.technical.rsi_strategy import RSIStrategy
 
     end_date   = datetime.now()
     test_start = end_date - timedelta(days=lookback_days)
@@ -163,14 +169,11 @@ def run_backtest(symbol: str, p: Params, lookback_days: int, train_years: int) -
             retrain_every  = 21,
             max_train_bars = 504,
             use_macro      = False,
-            num_leaves     = 31,
-            n_estimators   = 300,
+            num_leaves     = 63,      # matches default — was erroneously 31
+            n_estimators   = 500,     # more rounds = better calibrated proba
             min_hold_bars  = p.min_hold_bars,
             commission_rate= p.commission_rate,
         ))
-        .add_strategy(MACrossoverStrategy("ma_cross",   [symbol], fast_period=10, slow_period=30, use_ema=True))
-        .add_strategy(MACDStrategy(        "macd_sig",   [symbol], fast=12, slow=26, signal=9, min_hist=0.0))
-        .add_strategy(MACrossoverStrategy( "rsi_proxy",  [symbol], fast_period=5,  slow_period=20, use_ema=True))
     )
 
     result = asyncio.run(bt.run())

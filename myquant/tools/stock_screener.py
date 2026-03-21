@@ -134,17 +134,25 @@ def _fetch_and_score(sym, yf_tick, name, start_iso, end_iso, min_bars, n_score):
         n60            = len(closes_60)
         yang_ratio_60d = float((closes_60 > opens_60).sum() / n60) if n60 >= 20 else 0.5
 
+        _ret_1y  = (closes[-1] - closes[0]) / closes[0]
+        _max_dd  = _max_drawdown(closes)
+        # Calmar ratio = annual return / |max_drawdown|; capped at 5.0
+        # High calmar = strong return with limited downside — ideal ML training candidate.
+        _calmar  = float(_ret_1y / max(0.01, abs(_max_dd))) if _max_dd < -0.001 else float(_ret_1y / 0.01)
+        _calmar  = min(5.0, _calmar)
+
         return {
             "sym":           sym,
             "yf":            yf_tick,
             "name":          name,
             "bars":          len(df_s),
-            "ret_1y":        (closes[-1] - closes[0]) / closes[0],
+            "ret_1y":        _ret_1y,
             "ret_6m":        (closes[-1] - closes[mid_idx]) / closes[mid_idx],
             "ret_3m":        ret_3m,
             "ret_1m":        ret_1m,
             "sharpe":        _sharpe(rets),
-            "max_dd":        _max_drawdown(closes),
+            "max_dd":        _max_dd,
+            "calmar":        round(_calmar, 4),
             "trend_pct":     _ma50_pct_above(closes),
             "atr_pct":       _atr_pct(closes, highs, lows),
             "autocorr":      _autocorr_lag1(rets),
@@ -338,19 +346,26 @@ def screen(
     norm_low_vol  = _minmax([-r.get("vol_60d",  0.02) for r in results])   # lower vol = higher score
     norm_52w_dist = _minmax([r.get("dist_52w_high", 0) for r in results])  # further from peak = higher score
     norm_yang     = _minmax([r.get("yang_ratio_60d", 0.5) for r in results])  # more 阳线 = higher score
+    # Risk-adjusted return quality (Sharpe + Calmar)
+    norm_sharpe   = _minmax([r.get("sharpe",  0.0) for r in results])  # higher Sharpe = better risk-adj return
+    norm_calmar   = _minmax([r.get("calmar",  0.0) for r in results])  # higher Calmar = better return/drawdown
 
-    # Weights rebalanced to de-emphasise short-term momentum and reward
-    # value, stability, and distance from recent highs (per CN market advice):
-    #   TREND     0.20 (was 0.25) — still important but less dominant
-    #   ATR       0.10 (was 0.20) — keep, but quality > tradability
-    #   AUTOCORR  0.10 (was 0.20) — dampened; yang_ratio captures same info
-    #   MOM_6M    0.05 (was 0.20) — 6m momentum rewards hot stocks → minimal weight
-    #   DD        0.20 (was 0.15) — stronger safety penalty
-    #   LOW_VOL   0.15 (NEW)      — reward low-volatility quality names
-    #   DIST_52W  0.10 (NEW)      — reward stocks far from 52-week high
-    #   YANG      0.10 (NEW)      — 阳多绿少 candle structure (阳线 fraction)
-    W_TREND, W_ATR, W_AUTOCORR, W_MOM6M, W_DD, W_LOW_VOL, W_DIST_52W, W_YANG = (
-        0.20, 0.10, 0.10, 0.05, 0.20, 0.15, 0.10, 0.10
+    # Weights rebalanced to incorporate Sharpe and Calmar as first-class signals.
+    # Reduces YANG (0.10→0.05) and DIST_52W (0.10→0.05) to make room, keeping total = 1.0.
+    # Sharpe (0.10): direct risk-adjusted return quality
+    # Calmar (0.08): return vs max-drawdown — rewards stocks that trended without blowing up
+    #   TREND     0.20 — still important but not dominant
+    #   ATR       0.10 — keep, but quality > tradability
+    #   AUTOCORR  0.10 — dampened; yang_ratio captures same info
+    #   MOM_6M    0.05 — minimal; rewards hot stocks
+    #   DD        0.14 — strong safety penalty
+    #   LOW_VOL   0.13 — reward low-volatility quality names
+    #   DIST_52W  0.05 — value signal (reduced)
+    #   YANG      0.05 — candle structure (reduced)
+    #   SHARPE    0.10 — NEW: risk-adjusted return
+    #   CALMAR    0.08 — NEW: return per unit of max-drawdown
+    W_TREND, W_ATR, W_AUTOCORR, W_MOM6M, W_DD, W_LOW_VOL, W_DIST_52W, W_YANG, W_SHARPE, W_CALMAR = (
+        0.20, 0.10, 0.10, 0.05, 0.14, 0.13, 0.05, 0.05, 0.10, 0.08
     )
 
     # ── Auto-load tuned weights written by train_loop.py ─────────────────────
@@ -370,20 +385,20 @@ def screen(
             W_LOW_VOL  = float(_sw.get("W_LOW_VOL",  W_LOW_VOL))
             W_DIST_52W = float(_sw.get("W_DIST_52W", W_DIST_52W))
             W_YANG     = float(_sw.get("W_YANG",     W_YANG))
+            W_SHARPE   = float(_sw.get("W_SHARPE",   W_SHARPE))
+            W_CALMAR   = float(_sw.get("W_CALMAR",   W_CALMAR))
             if verbose:
                 print(f"  [train_loop weights loaded from {_sw_path.name}]")
         except Exception:
             pass
     for i, r in enumerate(results):
-        nt, na, nac, n6, ndd, nlv, n52, nyang = (
+        nt, na, nac, n6, ndd, nlv, n52, nyang, nsharpe, ncalmar = (
             norm_trend[i], norm_atr[i], norm_autocorr[i], norm_6m[i], norm_dd[i],
-            norm_low_vol[i], norm_52w_dist[i], norm_yang[i],
-        )
-        r["score"] = (
-            W_TREND * nt + W_ATR * na + W_AUTOCORR * nac + W_MOM6M * n6
-            + W_DD * ndd + W_LOW_VOL * nlv + W_DIST_52W * n52 + W_YANG * nyang
+            norm_low_vol[i], norm_52w_dist[i], norm_yang[i], norm_sharpe[i], norm_calmar[i],
         )
         # ── Causal trace: per-factor breakdown ───────────────────────────────
+        # Score is derived as the SUM of rounded contributions so that
+        # score == sum(causal_nodes[*].contribution) is always an exact identity.
         r["causal_nodes"] = [
             {
                 "factor":       "trend_pct",
@@ -473,6 +488,28 @@ def screen(
                 "direction":    "positive" if nyang >= 0.6 else "negative" if nyang < 0.4 else "neutral",
                 "percentile":   f"Top {max(1, int((1 - nyang) * 100))}%",
             },
+            {
+                "factor":       "sharpe",
+                "label":        "Sharpe Ratio",
+                "description":  f"Annualised Sharpe {r.get('sharpe', 0):.2f} — {'strong risk-adj return' if r.get('sharpe', 0) > 1.0 else 'moderate' if r.get('sharpe', 0) > 0.5 else 'weak'}",
+                "raw_value":    round(r.get("sharpe", 0), 4),
+                "norm_value":   round(nsharpe, 4),
+                "weight":       W_SHARPE,
+                "contribution": round(W_SHARPE * nsharpe, 4),
+                "direction":    "positive" if nsharpe >= 0.6 else "negative" if nsharpe < 0.4 else "neutral",
+                "percentile":   f"Top {max(1, int((1 - nsharpe) * 100))}%",
+            },
+            {
+                "factor":       "calmar",
+                "label":        "Calmar Ratio",
+                "description":  f"Calmar {r.get('calmar', 0):.2f} = 1Y return / |max-dd| — {'excellent' if r.get('calmar', 0) > 1.5 else 'good' if r.get('calmar', 0) > 0.8 else 'poor'}",
+                "raw_value":    round(r.get("calmar", 0), 4),
+                "norm_value":   round(ncalmar, 4),
+                "weight":       W_CALMAR,
+                "contribution": round(W_CALMAR * ncalmar, 4),
+                "direction":    "positive" if ncalmar >= 0.6 else "negative" if ncalmar < 0.4 else "neutral",
+                "percentile":   f"Top {max(1, int((1 - ncalmar) * 100))}%",
+            },
         ]
         r["gate_checks"] = [
             {
@@ -524,6 +561,8 @@ def screen(
                 "note":      f"1Y {r.get('ret_1y', 0):+.0%} · {r.get('dist_52w_high', 0):.0%} off peak",
             },
         ]
+        # Score = sum of rounded per-factor contributions (exact mathematical identity)
+        r["score"] = sum(n["contribution"] for n in r["causal_nodes"])
 
     results.sort(key=lambda r: r["score"], reverse=True)
 

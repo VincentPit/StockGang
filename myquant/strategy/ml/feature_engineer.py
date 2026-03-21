@@ -68,6 +68,9 @@ FEATURE_COLS: list[str] = [
     "adx_14",        # Average Directional Index (14-period): trend strength 0-100
     "cmf_20",        # Chaikin Money Flow (20-period): volume-weighted price direction
     "price_accel",   # momentum acceleration: ret_5d − ret_20d×0.25
+    # ── Session structure & volatility regime ─────────────────────────────
+    "overnight_gap", # (open − prev_close) / prev_close, ±10% clip: pre-session sentiment
+    "vol_accel",     # vol_20d / vol_120d: volatility expansion ratio (regime-change signal)
 ]
 
 
@@ -127,6 +130,17 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     # (min_periods=60 so it becomes valid before the full 120-bar warm-up)
     df["vol_20d"]  = ret.rolling(20).std()
     df["vol_120d"] = ret.rolling(120, min_periods=60).std()
+
+    # ── Overnight gap (pre-session sentiment) ────────────────────────────
+    # Measures the gap between today's open and yesterday's close.
+    # Positive = bullish overnight news/sentiment; negative = bearish gap.
+    # Particularly informative for A-shares where limit-up/down gaps are common.
+    df["overnight_gap"] = ((df["open"] - close.shift(1)) / (close.shift(1) + 1e-10)).clip(-0.10, 0.10)
+
+    # ── Volatility acceleration (regime-change signal) ────────────────────
+    # Ratio of short-term to long-term vol.  > 1.0 = vol expanding vs baseline
+    # (potential breakout or breakdown); < 1.0 = vol compressing (calm market).
+    df["vol_accel"] = (df["vol_20d"] / (df["vol_120d"] + 1e-10)).clip(0.0, 5.0)
 
     # ATR (normalized by close)
     tr = pd.concat(

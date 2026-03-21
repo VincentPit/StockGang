@@ -94,6 +94,7 @@ class LGBMStrategy(BaseStrategy):
         min_hold_bars: int = 5,          # bars of cooldown between consecutive signals
         commission_rate: float = 0.0003, # one-way commission — raises label threshold
         binary_mode: bool = True,        # BUY/NOTBUY instead of 3-class SELL/HOLD/BUY
+        regime_gate: bool = True,         # tighten confidence threshold when ADX<20 (choppy market)
         # ── LightGBM hyperparameters ────────────────────────────────────
         num_leaves: int = 63,
         n_estimators: int = 500,
@@ -112,6 +113,7 @@ class LGBMStrategy(BaseStrategy):
         self.min_hold_bars       = max(0, min_hold_bars)
         self.commission_rate     = commission_rate
         self.binary_mode         = binary_mode
+        self.regime_gate         = regime_gate
 
         self._lgb_params = dict(
             num_leaves        = num_leaves,
@@ -201,6 +203,7 @@ class LGBMStrategy(BaseStrategy):
         aligned: pd.DataFrame,
         feat_cols: list[str],
         binary: bool = False,
+        purge: int = 0,
     ) -> tuple[Any, Any]:
         """
         Fit a single (raw, calibrated) LightGBM model on a pre-labeled slice.
@@ -212,6 +215,8 @@ class LGBMStrategy(BaseStrategy):
                     Binary mode:  labels in {0, 1}       → used directly.
         feat_cols : Feature column names to use as model input.
         binary    : If True, labels are already {0, 1} — no +1 offset applied.
+        purge     : Number of rows to drop from the end of X_train to eliminate
+                    train/val label overlap (forward-return leakage embargo).
 
         Returns
         -------
@@ -227,14 +232,16 @@ class LGBMStrategy(BaseStrategy):
             n_train = int(n * self.train_ratio)
             if n_train < 20:
                 return None, None
-            X_train = aligned.iloc[:n_train][feat_cols]
-            y_train = aligned.iloc[:n_train]["label"] + offset
+            n_train_end = max(20, n_train - purge)     # embargo: skip forward-return overlap zone
+            X_train = aligned.iloc[:n_train_end][feat_cols]
+            y_train = aligned.iloc[:n_train_end]["label"] + offset
             X_val   = aligned.iloc[n_train:][feat_cols]
             y_val   = aligned.iloc[n_train:]["label"] + offset
             use_early_stop = False
         else:
-            X_train = aligned.iloc[:n_lgbm][feat_cols]
-            y_train = aligned.iloc[:n_lgbm]["label"] + offset
+            n_lgbm_end = max(40, n_lgbm - purge)       # embargo: skip forward-return overlap zone
+            X_train = aligned.iloc[:n_lgbm_end][feat_cols]
+            y_train = aligned.iloc[:n_lgbm_end]["label"] + offset
             X_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib][feat_cols]
             y_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib]["label"] + offset
             use_early_stop = True
@@ -329,7 +336,11 @@ class LGBMStrategy(BaseStrategy):
 
         for idx, win_size in enumerate(window_sizes):
             aligned_slice = aligned.iloc[-win_size:]
-            raw_m, cal_m  = self._train_one_window(aligned_slice, feat_cols, binary=self.binary_mode)
+            raw_m, cal_m  = self._train_one_window(
+                aligned_slice, feat_cols,
+                binary=self.binary_mode,
+                purge=self.forward_days,
+            )
             if cal_m is None:
                 continue
             ensemble.append(cal_m)
@@ -397,7 +408,17 @@ class LGBMStrategy(BaseStrategy):
         if self.binary_mode:
             # Binary: avg_proba shape (2,) → [p_notbuy, p_buy]
             p_buy = float(avg_proba[1]) if len(avg_proba) >= 2 else float(avg_proba[0])
-            if p_buy < self.min_confidence:
+
+            # ── Regime gate: tighten confidence requirement in choppy markets ───────
+            # ADX < 20 = directionless / choppy.  In such conditions the LightGBM
+            # classifier produces many false positives, so we raise the bar by +0.12.
+            eff_min_conf = self.min_confidence
+            if self.regime_gate and "adx_14" in latest.columns:
+                adx_now = float(latest["adx_14"].iloc[0])
+                if adx_now < 20:
+                    eff_min_conf = min(self.min_confidence + 0.12, 0.85)
+
+            if p_buy < eff_min_conf:
                 return None
             strength = SignalStrength.STRONG if p_buy > 0.70 else SignalStrength.NORMAL
             return self.make_signal(
@@ -416,7 +437,13 @@ class LGBMStrategy(BaseStrategy):
         pred  = int(np.argmax(avg_proba))   # 0=SELL  1=HOLD  2=BUY
         conf  = float(avg_proba[pred])
 
-        if conf < self.min_confidence:
+        # Regime gate for 3-class mode
+        eff_min_conf_3c = self.min_confidence
+        if self.regime_gate and "adx_14" in latest.columns:
+            if float(latest["adx_14"].iloc[0]) < 20:
+                eff_min_conf_3c = min(self.min_confidence + 0.12, 0.85)
+
+        if conf < eff_min_conf_3c:
             return None
 
         if pred == 2:  # BUY

@@ -237,7 +237,7 @@ class TestFetchAndScore:
 class TestScreenerCausalNodes:
     """Test screen() with mocked yfinance and universe."""
 
-    FACTORS = ["trend_pct", "atr_pct", "autocorr", "ret_6m", "max_dd", "vol_60d", "dist_52w_high", "yang_ratio_60d"]
+    FACTORS = ["trend_pct", "atr_pct", "autocorr", "ret_6m", "max_dd", "vol_60d", "dist_52w_high", "yang_ratio_60d", "sharpe", "calmar"]
 
     @pytest.fixture(autouse=True)
     def _patch_universe_and_yf(self, monkeypatch):
@@ -269,7 +269,7 @@ class TestScreenerCausalNodes:
         for r in results:
             assert "causal_nodes" in r
 
-    def test_exactly_eight_factors(self):
+    def test_exactly_ten_factors(self):
         from myquant.tools.stock_screener import screen
         _, results, _ = screen(top_n=2, min_bars=50, verbose=False)
         for r in results:
