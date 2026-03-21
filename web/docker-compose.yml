@@ -1,0 +1,147 @@
+version: "3.9"
+
+services:
+
+  # ── TimescaleDB (PostgreSQL + time-series extension) ──────────────────────
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: myquant_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       myquant
+      POSTGRES_USER:     myquant
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myquant"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: myquant_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Grafana Dashboard ─────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: myquant_grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER:     admin
+      GF_SECURITY_ADMIN_PASSWORD: myquant123
+      GF_INSTALL_PLUGINS:         grafana-clock-panel
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ── Streamlit Live Dashboard ──────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myquant_dashboard
+    restart: unless-stopped
+    command: streamlit run monitoring/dashboard.py --server.port 8501 --server.headless true
+    ports:
+      - "8501:8501"
+    environment:
+      REDIS_HOST: redis
+      POSTGRES_HOST: db
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  # ── Trading Engine (paper mode) ───────────────────────────────────────────
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myquant_engine
+    restart: unless-stopped
+    command: python main.py
+    environment:
+      ENV:           paper
+      REDIS_HOST:    redis
+      POSTGRES_HOST: db
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myquant_api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      LOG_LEVEL:       ${LOG_LEVEL:-INFO}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  # ── Next.js frontend ───────────────────────────────────────────────────────
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: myquant_web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Server-side: Next.js rewrites proxy to the api container
+      API_BASE_URL:        http://api:8000
+      # Client-side: browser JS calls the API through the host port
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  grafanadata:

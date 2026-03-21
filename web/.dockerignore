@@ -1,0 +1,37 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Data & logs (mounted as volumes at runtime)
+data/
+logs/
+*.db
+*.log
+
+# Version control
+.git/
+.gitignore
+
+# Node / Next.js (built separately in web/Dockerfile)
+web/node_modules/
+web/.next/
+
+# Tests
+tests/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# Env files (injected via docker-compose env_file or secrets)
+.env

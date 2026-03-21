@@ -1,0 +1,23 @@
+{
+  "min_confidence": 0.6,
+  "threshold": 0.015,
+  "min_hold_bars": 5,
+  "forward_days": 5,
+  "stop_loss_pct": -0.08,
+  "trailing_stop_pct": 0.0,
+  "take_profit_pct": 0.0,
+  "commission_rate": 0.0003,
+  "_source_symbol": "sz002648",
+  "_saved_at": "2026-03-20T23:17:10.150483",
+  "_result": {
+    "total_pnl": 11801.17,
+    "total_pnl_pct": 0.011801,
+    "sharpe_ratio": 0.23,
+    "max_drawdown": -0.0724,
+    "num_trades": 5,
+    "win_rate": 0.5,
+    "avg_win": 17015.89,
+    "avg_loss": -5214.72,
+    "profit_factor": 3.263
+  }
+}
