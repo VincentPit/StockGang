@@ -30,6 +30,7 @@ from myquant.models.tick import Tick
 from myquant.portfolio.portfolio_engine import PortfolioEngine
 from myquant.risk.risk_gate import RiskDecision, RiskGate
 from myquant.strategy.registry import StrategyRegistry
+from myquant.strategy.rl.bandit import StrategyBandit
 from myquant.strategy.sizing import atr_position_size
 
 logger = get_logger(__name__)
@@ -128,6 +129,18 @@ class Backtester:
         self._ma50:         dict[str, float]       = {}   # latest MA50 value
         # Per-symbol running price peak for trailing stop (reset on each new entry)
         self._peak_price: dict[str, float] = {}
+
+        # ── RL bandit: adaptive strategy weighting ──────────────────────
+        # Tracks realized P&L per strategy and assigns UCB1 confidence weights.
+        # Weights start neutral (1.0) and adapt as trades close.
+        self._bandit = StrategyBandit(
+            strategy_ids=[],   # populated lazily as strategies register signals
+            ema_alpha=0.15,
+            ucb_c=1.0,
+            pnl_scale=config.initial_cash * 0.005,  # 0.5% of initial capital
+        )
+        # Maps symbol → strategy_id that opened the current long position
+        self._position_open_strat: dict[str, str] = {}
         # Current bar prices (used by broker for slippage)
         self._current_prices: dict[str, float] = {}
 
@@ -278,6 +291,12 @@ class Backtester:
                 # Scale confidence by market regime
                 adj_conf = min(1.0, signal.confidence * multiplier)
 
+                # Apply RL bandit weight: strategies with better recent P&L get
+                # a confidence boost; under-performers get a small penalty.
+                # Weight is 1.0 at cold-start so it has no effect until trades close.
+                bandit_weight = self._bandit.get_weight(signal.strategy_id)
+                adj_conf = min(1.0, adj_conf * bandit_weight)
+
                 # Suppress new longs in RISK_OFF unless model is very confident
                 if (
                     self._regime_detector.is_risk_off()
@@ -382,9 +401,16 @@ class Backtester:
     def _track_sym_pnl(self, order: Order) -> None:
         """
         Accumulate gross realized P&L per symbol from SELL fills.
+        Also drives the RL bandit: records which strategy opened each position,
+        then rewards/penalises that strategy when the position closes.
         Must be registered as a fill callback BEFORE portfolio.on_fill so that
         the Position object still exists and avg_cost is readable.
         """
+        if order.side == OrderSide.BUY and order.filled_quantity > 0:
+            # Record which strategy opened this position (first BUY wins)
+            if order.symbol not in self._position_open_strat:
+                self._position_open_strat[order.symbol] = order.strategy_id
+
         if order.side == OrderSide.SELL and order.filled_quantity > 0:
             pos = self._portfolio.positions.get(order.symbol)
             if pos is not None and pos.is_long:
@@ -392,6 +418,14 @@ class Backtester:
                 realized = (order.avg_fill_price - pos.avg_cost) * closing_qty
                 self._symbol_cum_pnl[order.symbol] = (
                     self._symbol_cum_pnl.get(order.symbol, 0.0) + realized
+                )
+                # Update bandit with realized P&L for the opening strategy
+                open_strat = self._position_open_strat.pop(order.symbol, order.strategy_id)
+                self._bandit.update(open_strat, realized)
+                logger.debug(
+                    "Bandit ← [%s] realized=%.0f | weights=%s",
+                    open_strat, realized,
+                    {k: round(v, 2) for k, v in self._bandit.weights_summary().items()},
                 )
 
     def _build_result(self, nav_records: list) -> BacktestResult:

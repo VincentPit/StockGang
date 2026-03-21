@@ -33,6 +33,7 @@ from myquant.strategy.ml.feature_engineer import (
     FEATURE_COLS,
     bars_to_features,
     make_labels,
+    make_labels_rl,
     add_macro_features,
 )
 
@@ -89,6 +90,8 @@ class LGBMStrategy(BaseStrategy):
         n_ensemble_windows: int = 3,     # walk-forward ensemble: K temporal slices
         use_macro: bool = False,
         calibrate: bool = True,
+        min_hold_bars: int = 5,          # bars of cooldown between consecutive signals
+        commission_rate: float = 0.0003, # one-way commission — raises label threshold
         # ── LightGBM hyperparameters ────────────────────────────────────
         num_leaves: int = 63,
         n_estimators: int = 500,
@@ -104,6 +107,8 @@ class LGBMStrategy(BaseStrategy):
         self.n_ensemble_windows  = max(1, n_ensemble_windows)
         self.use_macro           = use_macro
         self.calibrate           = calibrate
+        self.min_hold_bars       = max(0, min_hold_bars)
+        self.commission_rate     = commission_rate
 
         self._lgb_params = dict(
             num_leaves        = num_leaves,
@@ -126,6 +131,10 @@ class LGBMStrategy(BaseStrategy):
         self._is_trained:  dict[str, bool]       = {}
         self._bar_counter: dict[str, int]        = {}
         self._feat_cols:   dict[str, list[str]]  = {}
+
+        # Cooldown tracking: last bar index on which a signal was emitted per symbol
+        self._bar_index:        dict[str, int] = {}   # global bar counter per symbol
+        self._last_signal_bar:  dict[str, int] = {}   # bar index when last signal fired
 
         # Optional: injected MacroFetcher
         self._macro_fetcher = None
@@ -152,6 +161,10 @@ class LGBMStrategy(BaseStrategy):
 
         symbol = bar.symbol
 
+        # Increment global bar counter for this symbol
+        idx = self._bar_index.get(symbol, 0) + 1
+        self._bar_index[symbol] = idx
+
         # Lazy train if model not ready
         if not self._is_trained.get(symbol):
             bars = list(self._bar_buffer.get(symbol, []))
@@ -167,7 +180,16 @@ class LGBMStrategy(BaseStrategy):
                 logger.debug("LGBMStrategy [%s]: re-training %s", self.strategy_id, symbol)
                 self._train(symbol)
 
-        return self._predict_signal(symbol, bar)
+        # Cooldown: do not emit a signal within min_hold_bars bars of the last one
+        if self.min_hold_bars > 0:
+            last = self._last_signal_bar.get(symbol, -9999)
+            if (idx - last) < self.min_hold_bars:
+                return None
+
+        sig = self._predict_signal(symbol, bar)
+        if sig is not None:
+            self._last_signal_bar[symbol] = idx
+        return sig
 
     # ── Training helpers ──────────────────────────────────────────────────────
 
@@ -269,7 +291,7 @@ class LGBMStrategy(BaseStrategy):
             except Exception as e:
                 logger.debug("LGBMStrategy: macro enrichment failed: %s", e)
 
-        labels  = make_labels(df, self.forward_days, self.threshold)
+        labels  = make_labels_rl(df, self.forward_days, self.threshold, self.commission_rate)
         aligned = df.join(labels.rename("label")).dropna()
 
         if len(aligned) < 60:

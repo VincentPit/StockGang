@@ -267,6 +267,45 @@ def make_labels(
     return labels
 
 
+def make_labels_rl(
+    df: pd.DataFrame,
+    forward_days: int = 5,
+    threshold: float = 0.01,
+    commission_rate: float = 0.0003,
+) -> pd.Series:
+    """
+    Cost-aware ternary labels for RL-style LGBM training.
+
+    Identical to make_labels() but the threshold is raised by the estimated
+    round-trip commission (buy + sell).  This prevents the model from labelling
+    marginal-edge bars as BUY/SELL — trades that commission would immediately
+    put underwater.
+
+    Example: threshold=0.015, commission_rate=0.0003
+      → effective threshold = 0.015 + 2×0.0003 = 0.0156
+      → model only labels as BUY if forward_return > 1.56% (net of costs)
+
+    Parameters
+    ----------
+    df              : DataFrame with a 'close' column, indexed by timestamp.
+    forward_days    : Label horizon in bars.
+    threshold       : Minimum *net* forward return to label as directional.
+    commission_rate : One-way commission fraction (e.g. 0.0003 = 0.03%).
+                      Round-trip cost = 2 × commission_rate.
+
+    Returns
+    -------
+    pd.Series of {-1, 0, +1} aligned to df.index.
+    """
+    round_trip_cost = 2.0 * commission_rate
+    effective_thresh = threshold + round_trip_cost
+    fwd_ret = df["close"].pct_change(forward_days).shift(-forward_days)
+    labels = pd.Series(0, index=df.index, dtype=int)
+    labels[fwd_ret >  effective_thresh] =  1
+    labels[fwd_ret < -effective_thresh] = -1
+    return labels
+
+
 def add_macro_features(df: pd.DataFrame, macro_snap) -> pd.DataFrame:
     """
     Broadcast scalar macro indicators onto every row of the features DataFrame.

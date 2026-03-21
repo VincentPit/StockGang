@@ -481,3 +481,198 @@ class TestRiskGateBelowMA20:
         gate.set_ma20_map({"sh600519": 110.0})   # lower-case input
         decision = gate._check_below_ma20(self._buy("SH600519", price=100.0))
         assert not decision.approved
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestStrategyBandit — RL UCB1 adaptive strategy weighting
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestStrategyBandit:
+    """Unit tests for the UCB1 multi-armed bandit strategy selector."""
+
+    def _bandit(self, ids=None):
+        from myquant.strategy.rl.bandit import StrategyBandit
+        return StrategyBandit(
+            strategy_ids=ids or ["lgbm_core", "rsi_filter", "macd_sig"],
+            ema_alpha=0.5,    # fast adaptation for testing
+            ucb_c=1.0,
+            pnl_scale=1000.0,
+        )
+
+    def test_cold_start_returns_one(self):
+        """Before any updates, all weights must be 1.0 (neutral)."""
+        b = self._bandit()
+        assert b.get_weight("lgbm_core") == 1.0
+        assert b.get_weight("rsi_filter") == 1.0
+        assert b.get_weight("macd_sig") == 1.0
+
+    def test_unknown_strategy_returns_one(self):
+        """Unknown strategy_id returns 1.0 without crashing."""
+        b = self._bandit()
+        assert b.get_weight("unknown_strat") == 1.0
+
+    def test_profitable_strategy_gets_weight_above_one(self):
+        """After repeated profits, a strategy's weight should exceed 1.0."""
+        b = self._bandit(["strat_a", "strat_b"])
+        # Feed many wins to strat_a
+        for _ in range(20):
+            b.update("strat_a", 2000.0)   # consistent wins
+        for _ in range(20):
+            b.update("strat_b", -500.0)   # consistent losses
+        assert b.get_weight("strat_a") > b.get_weight("strat_b"), (
+            "Profitable strategy should outweigh losing strategy"
+        )
+        assert b.get_weight("strat_a") > 1.0, "Big winner should have weight > 1.0"
+
+    def test_losing_strategy_gets_weight_below_one(self):
+        """After repeated losses, a strategy's weight should drop below 1.0."""
+        b = self._bandit(["only"])
+        for _ in range(15):
+            b.update("only", -3000.0)
+        assert b.get_weight("only") < 1.0, "Losing strategy should have weight < 1.0"
+
+    def test_weight_bounded(self):
+        """Weight must always stay within [W_MIN, W_MAX]."""
+        from myquant.strategy.rl.bandit import _WEIGHT_MIN, _WEIGHT_MAX
+        b = self._bandit(["x"])
+        for pnl in [1e9, -1e9, 0, 500, -500]:
+            b.update("x", pnl)
+        w = b.get_weight("x")
+        assert _WEIGHT_MIN <= w <= _WEIGHT_MAX, f"Weight {w} outside bounds"
+
+    def test_auto_register_unknown_strategy(self):
+        """update() with an unknown strategy_id should auto-register it."""
+        b = self._bandit([])
+        b.update("new_strat", 1000.0)
+        # Should not raise and should return a sensible weight
+        w = b.get_weight("new_strat")
+        assert 0.5 < w < 2.0
+
+    def test_weights_summary_contains_all_ids(self):
+        """weights_summary() should return a dict with all registered strategy IDs."""
+        b = self._bandit(["a", "b", "c"])
+        summary = b.weights_summary()
+        for k in ["a", "b", "c"]:
+            assert k in summary
+            assert isinstance(summary[k]["weight"], float)
+
+    def test_exploration_bonus_cold_strategy(self):
+        """A strategy with 0 updates gets UCB exploration bonus — weight must equal
+        a 'seen' strategy with moderate EMA after the first update is made."""
+        b = self._bandit(["active", "cold"])
+        for _ in range(10):
+            b.update("active", 0.0)   # neutral updates to increment T
+        # cold has n=0, total_updates=10 → large explore bonus
+        w_cold   = b.get_weight("cold")
+        w_active = b.get_weight("active")
+        # Cold (unexplored) gets a higher UCB bonus than neutral-updated active
+        assert w_cold >= w_active, "Unexplored strategy should get UCB exploration bonus"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestMakeLabelsRL — cost-aware labels
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestMakeLabelsRL:
+    """Tests for make_labels_rl() — cost-aware ternary classification labels."""
+
+    @pytest.fixture(autouse=True)
+    def _bars(self):
+        from myquant.strategy.ml.feature_engineer import bars_to_features
+        self.df = bars_to_features(_make_bars(300, "SH600519"))
+
+    def test_returns_ternary(self):
+        """make_labels_rl() must return only {-1, 0, 1}."""
+        from myquant.strategy.ml.feature_engineer import make_labels_rl
+        labels = make_labels_rl(self.df, forward_days=5, threshold=0.015, commission_rate=0.0003)
+        valid = labels.dropna()
+        assert set(valid.unique()).issubset({-1, 0, 1})
+
+    def test_fewer_extremes_than_plain_labels(self):
+        """Cost-aware labels should have equal or fewer BUY+SELL labels than plain labels."""
+        from myquant.strategy.ml.feature_engineer import make_labels, make_labels_rl
+        plain = make_labels(self.df, forward_days=5, threshold=0.015)
+        rl    = make_labels_rl(self.df, forward_days=5, threshold=0.015, commission_rate=0.0003)
+        n_directional_plain = (plain.dropna() != 0).sum()
+        n_directional_rl    = (rl.dropna()    != 0).sum()
+        assert n_directional_rl <= n_directional_plain, (
+            "Cost-aware labels should suppress marginal-edge signals"
+        )
+
+    def test_index_aligned(self):
+        """Labels must be aligned to the input DataFrame's index."""
+        from myquant.strategy.ml.feature_engineer import make_labels_rl
+        labels = make_labels_rl(self.df, forward_days=5, threshold=0.015)
+        assert labels.index.equals(self.df.index)
+
+    def test_zero_commission_equals_plain_labels(self):
+        """With commission_rate=0, cost-aware labels must equal plain make_labels()."""
+        import pandas as pd
+        from myquant.strategy.ml.feature_engineer import make_labels, make_labels_rl
+        plain = make_labels(self.df, forward_days=5, threshold=0.015)
+        rl    = make_labels_rl(self.df, forward_days=5, threshold=0.015, commission_rate=0.0)
+        pd.testing.assert_series_equal(plain, rl)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestLGBMMinHold — cooldown between signals
+# ══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.skipif(not _HAS_LGB_FOR_TEST, reason="lightgbm not installed")
+class TestLGBMMinHold:
+    """Tests for the min_hold_bars cooldown added to LGBMStrategy."""
+
+    SYMBOL = "sh600519"
+
+    def _trained_strategy(self, min_hold: int = 5) -> "LGBMStrategy":
+        import asyncio
+        from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
+        s = LGBMStrategy(
+            "test_minhold", [self.SYMBOL],
+            n_ensemble_windows=1, max_train_bars=260,
+            min_confidence=0.0,   # emit all non-HOLD predictions
+            min_hold_bars=min_hold,
+        )
+        bars = _make_bars(260, self.SYMBOL)
+        s.warm_bars(self.SYMBOL, bars)
+        asyncio.run(s.on_start())
+        return s, bars
+
+    def test_min_hold_params_stored(self):
+        """min_hold_bars and commission_rate must be stored as attributes."""
+        from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
+        s = LGBMStrategy("t", ["sh600519"], min_hold_bars=7, commission_rate=0.0005)
+        assert s.min_hold_bars == 7
+        assert s.commission_rate == 0.0005
+
+    def test_cooldown_suppresses_rapid_signals(self):
+        """With min_hold_bars=5, the strategy should emit fewer signals than
+        a version with min_hold_bars=0 when fed the same bar sequence."""
+        import asyncio
+        from myquant.models.signal import Signal
+        from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
+
+        bars = _make_bars(260, self.SYMBOL)
+
+        def count_signals(min_hold: int) -> int:
+            s = LGBMStrategy(
+                "t", [self.SYMBOL],
+                n_ensemble_windows=1, max_train_bars=260,
+                min_confidence=0.0,
+                min_hold_bars=min_hold,
+            )
+            s.warm_bars(self.SYMBOL, bars)
+            asyncio.run(s.on_start())
+            count = 0
+            for b in bars[-50:]:  # replay last 50 bars after training
+                sig = s.on_bar(b)
+                if isinstance(sig, Signal):
+                    count += 1
+            return count
+
+        signals_no_hold = count_signals(min_hold=0)
+        signals_with_hold = count_signals(min_hold=5)
+        assert signals_with_hold <= signals_no_hold, (
+            f"min_hold_bars=5 should produce ≤ signals than min_hold_bars=0 "
+            f"({signals_with_hold} vs {signals_no_hold})"
+        )
