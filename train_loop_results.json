@@ -1,45 +1,40 @@
 {
-  "run_at": "2026-03-20T22:40:02.420569",
+  "run_at": "2026-03-20T22:49:08.766623",
   "symbols_tested": [
     "sh601877",
     "sh600522",
     "sz002648",
     "sh601669",
-    "sz000617",
-    "sh600482",
-    "sh688008",
-    "sz300442",
-    "sz300418",
-    "sz002028"
+    "sz000617"
   ],
   "found_passing": true,
   "best": {
-    "symbol": "sh600522",
-    "config": "ultra_combo",
+    "symbol": "sz002648",
+    "config": "baseline",
     "params": {
-      "min_confidence": 0.7,
-      "threshold": 0.02,
+      "min_confidence": 0.6,
+      "threshold": 0.015,
       "min_hold_bars": 5,
       "forward_days": 5,
       "stop_loss_pct": -0.08,
-      "trailing_stop_pct": 0.08,
-      "take_profit_pct": 0.15,
+      "trailing_stop_pct": 0.0,
+      "take_profit_pct": 0.0,
       "commission_rate": 0.0003
     },
     "result": {
-      "total_pnl": 18836.66,
-      "total_pnl_pct": 0.018837,
-      "sharpe_ratio": 0.3928,
-      "max_drawdown": -0.0495,
-      "num_trades": 4,
+      "total_pnl": 11801.17,
+      "total_pnl_pct": 0.011801,
+      "sharpe_ratio": 0.23,
+      "max_drawdown": -0.0724,
+      "num_trades": 5,
       "win_rate": 0.5,
-      "avg_win": 20323.34,
-      "avg_loss": -1486.68,
-      "profit_factor": 13.6703
+      "avg_win": 17015.89,
+      "avg_loss": -5214.72,
+      "profit_factor": 3.263
     },
-    "score": 140.203,
+    "score": 1036.13,
     "passes": true,
-    "elapsed_s": 2.2
+    "elapsed_s": 2.1
   },
   "all_trials": [
     {
@@ -68,7 +63,7 @@
       },
       "score": 14.254,
       "passes": false,
-      "elapsed_s": 3.9
+      "elapsed_s": 3.2
     },
     {
       "symbol": "sh601877",
@@ -96,7 +91,7 @@
       },
       "score": 27.373,
       "passes": false,
-      "elapsed_s": 3.4
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh601877",
@@ -124,7 +119,7 @@
       },
       "score": 24.379,
       "passes": false,
-      "elapsed_s": 4.2
+      "elapsed_s": 2.1
     },
     {
       "symbol": "sh601877",
@@ -152,7 +147,7 @@
       },
       "score": 14.254,
       "passes": false,
-      "elapsed_s": 3.2
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh601877",
@@ -180,7 +175,7 @@
       },
       "score": 14.254,
       "passes": false,
-      "elapsed_s": 2.6
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh601877",
@@ -208,7 +203,7 @@
       },
       "score": 21.296,
       "passes": false,
-      "elapsed_s": 2.2
+      "elapsed_s": 2.1
     },
     {
       "symbol": "sh601877",
@@ -236,7 +231,7 @@
       },
       "score": 14.254,
       "passes": false,
-      "elapsed_s": 2.5
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh601877",
@@ -264,7 +259,7 @@
       },
       "score": 46.714,
       "passes": false,
-      "elapsed_s": 2.3
+      "elapsed_s": 2.1
     },
     {
       "symbol": "sh601877",
@@ -292,7 +287,7 @@
       },
       "score": 14.311,
       "passes": false,
-      "elapsed_s": 2.2
+      "elapsed_s": 2.1
     },
     {
       "symbol": "sh601877",
@@ -320,7 +315,7 @@
       },
       "score": 24.379,
       "passes": false,
-      "elapsed_s": 2.1
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh601877",
@@ -348,7 +343,7 @@
       },
       "score": 14.254,
       "passes": false,
-      "elapsed_s": 2.2
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh601877",
@@ -376,7 +371,7 @@
       },
       "score": 14.521,
       "passes": false,
-      "elapsed_s": 2.1
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh601877",
@@ -404,7 +399,7 @@
       },
       "score": 25.58,
       "passes": false,
-      "elapsed_s": 2.3
+      "elapsed_s": 2.1
     },
     {
       "symbol": "sh600522",
@@ -420,18 +415,18 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
+      "score": -999.0,
+      "passes": false,
       "elapsed_s": 2.0
     },
     {
@@ -448,19 +443,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
-      "elapsed_s": 2.4
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh600522",
@@ -476,19 +471,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
-      "elapsed_s": 2.3
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.1
     },
     {
       "symbol": "sh600522",
@@ -504,18 +499,18 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
+      "score": -999.0,
+      "passes": false,
       "elapsed_s": 2.1
     },
     {
@@ -532,19 +527,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
-      "elapsed_s": 2.1
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh600522",
@@ -560,19 +555,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 2561.11,
-        "total_pnl_pct": 0.002561,
-        "sharpe_ratio": 0.1069,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 4047.79,
+        "total_pnl_pct": 0.004048,
+        "sharpe_ratio": 0.1372,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 4047.79,
-        "avg_loss": -1486.68,
-        "profit_factor": 2.7227
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 30.727,
-      "passes": true,
-      "elapsed_s": 2.1
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh600522",
@@ -588,19 +583,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 5032.39,
-        "total_pnl_pct": 0.005032,
-        "sharpe_ratio": 0.1511,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 6519.07,
+        "total_pnl_pct": 0.006519,
+        "sharpe_ratio": 0.1895,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 6519.07,
-        "avg_loss": -1486.68,
-        "profit_factor": 4.385
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 47.35,
-      "passes": true,
-      "elapsed_s": 2.7
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.1
     },
     {
       "symbol": "sh600522",
@@ -616,19 +611,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 2561.11,
-        "total_pnl_pct": 0.002561,
-        "sharpe_ratio": 0.1069,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 4047.79,
+        "total_pnl_pct": 0.004048,
+        "sharpe_ratio": 0.1372,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 4047.79,
-        "avg_loss": -1486.68,
-        "profit_factor": 2.7227
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 30.727,
-      "passes": true,
-      "elapsed_s": 2.3
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh600522",
@@ -644,19 +639,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
-      "elapsed_s": 2.1
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh600522",
@@ -672,19 +667,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
-      "elapsed_s": 2.4
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh600522",
@@ -700,19 +695,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
-      "elapsed_s": 2.0
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.1
     },
     {
       "symbol": "sh600522",
@@ -728,19 +723,19 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18387.34,
-        "total_pnl_pct": 0.018387,
-        "sharpe_ratio": 0.385,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 19874.01,
+        "total_pnl_pct": 0.019874,
+        "sharpe_ratio": 0.4632,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 19874.01,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.3681
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 137.181,
-      "passes": true,
-      "elapsed_s": 2.1
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.0
     },
     {
       "symbol": "sh600522",
@@ -756,23 +751,388 @@
         "commission_rate": 0.0003
       },
       "result": {
-        "total_pnl": 18836.66,
-        "total_pnl_pct": 0.018837,
-        "sharpe_ratio": 0.3928,
-        "max_drawdown": -0.0495,
-        "num_trades": 4,
-        "win_rate": 0.5,
+        "total_pnl": 20323.34,
+        "total_pnl_pct": 0.020323,
+        "sharpe_ratio": 0.4724,
+        "max_drawdown": -0.048,
+        "num_trades": 2,
+        "win_rate": 1.0,
         "avg_win": 20323.34,
-        "avg_loss": -1486.68,
-        "profit_factor": 13.6703
+        "avg_loss": 0.0,
+        "profit_factor": 99.99
       },
-      "score": 140.203,
+      "score": -999.0,
+      "passes": false,
+      "elapsed_s": 2.0
+    },
+    {
+      "symbol": "sz002648",
+      "config": "baseline",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.015,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 11801.17,
+        "total_pnl_pct": 0.011801,
+        "sharpe_ratio": 0.23,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 17015.89,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.263
+      },
+      "score": 1036.13,
+      "passes": true,
+      "elapsed_s": 2.1
+    },
+    {
+      "symbol": "sz002648",
+      "config": "strict_conf",
+      "params": {
+        "min_confidence": 0.65,
+        "threshold": 0.015,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 11801.17,
+        "total_pnl_pct": 0.011801,
+        "sharpe_ratio": 0.23,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 17015.89,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.263
+      },
+      "score": 1036.13,
+      "passes": true,
+      "elapsed_s": 2.1
+    },
+    {
+      "symbol": "sz002648",
+      "config": "high_thresh",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.02,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 11801.17,
+        "total_pnl_pct": 0.011801,
+        "sharpe_ratio": 0.23,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 17015.89,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.263
+      },
+      "score": 1036.13,
+      "passes": true,
+      "elapsed_s": 2.0
+    },
+    {
+      "symbol": "sz002648",
+      "config": "long_hold",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.015,
+        "min_hold_bars": 10,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 11801.17,
+        "total_pnl_pct": 0.011801,
+        "sharpe_ratio": 0.23,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 17015.89,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.263
+      },
+      "score": 1036.13,
+      "passes": true,
+      "elapsed_s": 2.4
+    },
+    {
+      "symbol": "sz002648",
+      "config": "tight_stop",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.015,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.06,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 11801.17,
+        "total_pnl_pct": 0.011801,
+        "sharpe_ratio": 0.23,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 17015.89,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.263
+      },
+      "score": 1036.13,
       "passes": true,
       "elapsed_s": 2.2
+    },
+    {
+      "symbol": "sz002648",
+      "config": "trailing_06",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.015,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.06,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 10738.76,
+        "total_pnl_pct": 0.010739,
+        "sharpe_ratio": 0.218,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 15953.48,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.0593
+      },
+      "score": 1034.093,
+      "passes": true,
+      "elapsed_s": 2.1
+    },
+    {
+      "symbol": "sz002648",
+      "config": "take_profit_12",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.015,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.12,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 6451.2,
+        "total_pnl_pct": 0.006451,
+        "sharpe_ratio": 0.1689,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 11665.92,
+        "avg_loss": -5214.72,
+        "profit_factor": 2.2371
+      },
+      "score": 1025.871,
+      "passes": true,
+      "elapsed_s": 2.1
+    },
+    {
+      "symbol": "sz002648",
+      "config": "safe_combo",
+      "params": {
+        "min_confidence": 0.65,
+        "threshold": 0.02,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.06,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 10738.76,
+        "total_pnl_pct": 0.010739,
+        "sharpe_ratio": 0.218,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 15953.48,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.0593
+      },
+      "score": 1034.093,
+      "passes": true,
+      "elapsed_s": 2.0
+    },
+    {
+      "symbol": "sz002648",
+      "config": "very_strict",
+      "params": {
+        "min_confidence": 0.7,
+        "threshold": 0.015,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 11801.17,
+        "total_pnl_pct": 0.011801,
+        "sharpe_ratio": 0.23,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 17015.89,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.263
+      },
+      "score": 1036.13,
+      "passes": true,
+      "elapsed_s": 2.1
+    },
+    {
+      "symbol": "sz002648",
+      "config": "very_high_thresh",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.025,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 11801.17,
+        "total_pnl_pct": 0.011801,
+        "sharpe_ratio": 0.23,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 17015.89,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.263
+      },
+      "score": 1036.13,
+      "passes": true,
+      "elapsed_s": 2.1
+    },
+    {
+      "symbol": "sz002648",
+      "config": "long_hold_15",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.015,
+        "min_hold_bars": 15,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.0,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 11801.17,
+        "total_pnl_pct": 0.011801,
+        "sharpe_ratio": 0.23,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 17015.89,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.263
+      },
+      "score": 1036.13,
+      "passes": true,
+      "elapsed_s": 2.1
+    },
+    {
+      "symbol": "sz002648",
+      "config": "trailing_10",
+      "params": {
+        "min_confidence": 0.6,
+        "threshold": 0.015,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.1,
+        "take_profit_pct": 0.0,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 10738.76,
+        "total_pnl_pct": 0.010739,
+        "sharpe_ratio": 0.218,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 15953.48,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.0593
+      },
+      "score": 1034.093,
+      "passes": true,
+      "elapsed_s": 2.1
+    },
+    {
+      "symbol": "sz002648",
+      "config": "ultra_combo",
+      "params": {
+        "min_confidence": 0.7,
+        "threshold": 0.02,
+        "min_hold_bars": 5,
+        "forward_days": 5,
+        "stop_loss_pct": -0.08,
+        "trailing_stop_pct": 0.08,
+        "take_profit_pct": 0.15,
+        "commission_rate": 0.0003
+      },
+      "result": {
+        "total_pnl": 10738.76,
+        "total_pnl_pct": 0.010739,
+        "sharpe_ratio": 0.218,
+        "max_drawdown": -0.0724,
+        "num_trades": 5,
+        "win_rate": 0.5,
+        "avg_win": 15953.48,
+        "avg_loss": -5214.72,
+        "profit_factor": 3.0593
+      },
+      "score": 1034.093,
+      "passes": true,
+      "elapsed_s": 2.1
     }
   ],
   "diagnoses": [
     "sh601877: win_rate too low (avg 20% < 40%)",
-    "sh600522: 13/13 configs pass"
+    "sh600522: too few trades (avg 2.0 < 3)",
+    "sz002648: 13/13 configs pass"
   ]
 }

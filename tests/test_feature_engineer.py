@@ -107,9 +107,9 @@ class TestBarsToFeatures:
         assert nan_cols == [], f"NaN in columns: {nan_cols}"
 
     def test_feature_col_count(self):
-        """FEATURE_COLS list must have exactly 28 entries (frozen contract)."""
-        assert len(FEATURE_COLS) == 28, (
-            f"Expected 28 features, got {len(FEATURE_COLS)}. "
+        """FEATURE_COLS list must have exactly 32 entries (frozen contract)."""
+        assert len(FEATURE_COLS) == 32, (
+            f"Expected 32 features, got {len(FEATURE_COLS)}. "
             "Did you add/remove a feature without updating this test?"
         )
 

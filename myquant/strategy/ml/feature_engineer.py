@@ -63,6 +63,11 @@ FEATURE_COLS: list[str] = [
     "stoch_k",            # Stochastic %K (14-period): position in recent high/low range
     "stoch_d",            # Stochastic %D (3-period SMA of %K): slower signal line
     "ma50_slope",         # 5-bar rate of change of MA50 — trend acceleration signal
+    # ── New quality features ─────────────────────────────────────────────────
+    "ret_5d",        # 5-day return — short-term momentum (useful with ADX filter)
+    "adx_14",        # Average Directional Index (14-period): trend strength 0-100
+    "cmf_20",        # Chaikin Money Flow (20-period): volume-weighted price direction
+    "price_accel",   # momentum acceleration: ret_5d − ret_20d×0.25
 ]
 
 
@@ -112,9 +117,10 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     # (steady climber) when viewed through a 60d lens — but the model can
     # distinguish them via vol_20d and dist_52w_high.
     df["ret_1d"]   = ret
+    df["ret_5d"]   = close.pct_change(5)
+    df["ret_20d"]  = close.pct_change(20)
     df["ret_60d"]  = close.pct_change(60)
     df["ret_120d"] = close.pct_change(120)
-    df["ret_20d"]  = close.pct_change(20)
 
     # ── Volatility ───────────────────────────────────────────
     # vol_120d: long-term stability signal — low value = quality, low-vol stock
@@ -237,6 +243,35 @@ def bars_to_features(bars: list[Bar]) -> pd.DataFrame:
     # Clipped to ±5% to suppress extreme values during thin early-history periods.
     df["ma50_slope"] = ma50.pct_change(5).clip(-0.05, 0.05)
 
+    # ── ADX (Average Directional Index, 14-period) ────────────────────────────
+    # Trend strength indicator: 0 = no trend, 100 = very strong trend.
+    # ADX > 25 = trending; < 20 = choppy.  Uses Wilder EWM (alpha = 1/14).
+    alpha14   = 1.0 / 14
+    plus_dm   = (high - high.shift(1)).clip(lower=0)
+    minus_dm  = (low.shift(1) - low).clip(lower=0)
+    dm_mask   = plus_dm >= minus_dm          # bar where +DM dominates
+    plus_dm   = plus_dm.where(dm_mask,    0.0)
+    minus_dm  = minus_dm.where(~dm_mask,  0.0)
+    smooth_tr  = tr.ewm(alpha=alpha14, min_periods=1, adjust=False).mean()
+    smooth_pdm = plus_dm.ewm(alpha=alpha14, min_periods=1, adjust=False).mean()
+    smooth_mdm = minus_dm.ewm(alpha=alpha14, min_periods=1, adjust=False).mean()
+    plus_di14  = 100.0 * smooth_pdm / (smooth_tr + 1e-10)
+    minus_di14 = 100.0 * smooth_mdm / (smooth_tr + 1e-10)
+    dx         = 100.0 * (plus_di14 - minus_di14).abs() / (plus_di14 + minus_di14 + 1e-10)
+    df["adx_14"] = dx.ewm(alpha=alpha14, min_periods=1, adjust=False).mean()
+
+    # ── Chaikin Money Flow (CMF, 20-period) ───────────────────────────────────
+    # Where the close sits in the bar's H-L range, weighted by volume.
+    # Positive = persistent buying pressure; negative = selling pressure.
+    mfm          = ((close - low) - (high - close)) / (high - low + 1e-10)
+    mfv          = mfm * volume
+    df["cmf_20"] = mfv.rolling(20).sum() / (volume.rolling(20).sum() + 1e-10)
+
+    # ── Price acceleration (momentum second derivative) ───────────────────────
+    # Positive = short-term momentum faster than medium-term → early breakout
+    # Negative = momentum decelerating → possible trend fade
+    df["price_accel"] = (df["ret_5d"] - df["ret_20d"] * 0.25).clip(-0.10, 0.10)
+
     return df.dropna(subset=FEATURE_COLS)
 
 
@@ -303,6 +338,51 @@ def make_labels_rl(
     labels = pd.Series(0, index=df.index, dtype=int)
     labels[fwd_ret >  effective_thresh] =  1
     labels[fwd_ret < -effective_thresh] = -1
+    return labels
+
+
+def make_labels_adaptive(
+    df: pd.DataFrame,
+    forward_days: int = 5,
+    threshold: float = 0.015,
+    commission_rate: float = 0.0003,
+    vol_window: int = 20,
+    vol_multiplier: float = 1.2,
+) -> pd.Series:
+    """
+    Volatility-adaptive ternary labels.
+
+    The effective threshold scales with the stock's own recent daily volatility:
+        eff_thresh(t) = max(base_thresh,
+                            vol_multiplier × rolling_vol(t) × √forward_days)
+
+    High-vol stocks require a bigger forward move to be labelled BUY/SELL,
+    preventing the model from learning noisy marginal-edge patterns that are
+    indistinguishable from random noise.  Low-vol stocks are not over-penalised.
+
+    Parameters
+    ----------
+    df              : DataFrame with a 'close' column, indexed by timestamp.
+    forward_days    : Label horizon in bars.
+    threshold       : Minimum base threshold (floor when vol is very low).
+    commission_rate : One-way commission — adds to base threshold.
+    vol_window      : Rolling window for daily vol estimation (default 20).
+    vol_multiplier  : 1-sigma-×-sqrt(T) scale factor (default 1.2).
+
+    Returns
+    -------
+    pd.Series of {-1, 0, +1} aligned to df.index.
+    """
+    round_trip  = 2.0 * commission_rate
+    base_thresh = threshold + round_trip
+    fwd_ret     = df["close"].pct_change(forward_days).shift(-forward_days)
+    daily_vol   = df["close"].pct_change().rolling(vol_window, min_periods=10).std()
+    vol_thresh  = (vol_multiplier * daily_vol * (forward_days ** 0.5)).clip(base_thresh, 0.10)
+    eff_thresh  = vol_thresh.fillna(base_thresh)
+
+    labels = pd.Series(0, index=df.index, dtype=int)
+    labels[fwd_ret >  eff_thresh] =  1
+    labels[fwd_ret < -eff_thresh] = -1
     return labels
 
 

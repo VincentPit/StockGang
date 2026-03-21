@@ -145,8 +145,8 @@ class TestFeatureEngineer:
         assert df[FEATURE_COLS].isna().sum().sum() == 0
 
     def test_feature_count_matches(self):
-        """FEATURE_COLS should have exactly 28 entries (CN rules 1-4: recent_limit_up/yang_ratio/candle_strength)."""
-        assert len(FEATURE_COLS) == 28
+        """FEATURE_COLS should have exactly 32 entries (incl. ret_5d/adx_14/cmf_20/price_accel)."""
+        assert len(FEATURE_COLS) == 32
 
     def test_wr_14_range(self):
         """Williams %R (inverted, normalised) must be in [0, 100]."""

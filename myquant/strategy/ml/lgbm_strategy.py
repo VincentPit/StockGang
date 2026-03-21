@@ -34,6 +34,7 @@ from myquant.strategy.ml.feature_engineer import (
     bars_to_features,
     make_labels,
     make_labels_rl,
+    make_labels_adaptive,
     add_macro_features,
 )
 
@@ -87,11 +88,12 @@ class LGBMStrategy(BaseStrategy):
         min_confidence: float = 0.52,
         retrain_every: int = 63,         # quarterly rolling retrain (0 = disabled)
         max_train_bars: int = 504,       # rolling window: ~2 years of daily bars
-        n_ensemble_windows: int = 3,     # walk-forward ensemble: K temporal slices
+        n_ensemble_windows: int = 4,     # walk-forward ensemble: K temporal slices
         use_macro: bool = False,
         calibrate: bool = True,
         min_hold_bars: int = 5,          # bars of cooldown between consecutive signals
         commission_rate: float = 0.0003, # one-way commission — raises label threshold
+        binary_mode: bool = True,        # BUY/NOTBUY instead of 3-class SELL/HOLD/BUY
         # ── LightGBM hyperparameters ────────────────────────────────────
         num_leaves: int = 63,
         n_estimators: int = 500,
@@ -109,6 +111,7 @@ class LGBMStrategy(BaseStrategy):
         self.calibrate           = calibrate
         self.min_hold_bars       = max(0, min_hold_bars)
         self.commission_rate     = commission_rate
+        self.binary_mode         = binary_mode
 
         self._lgb_params = dict(
             num_leaves        = num_leaves,
@@ -197,20 +200,25 @@ class LGBMStrategy(BaseStrategy):
         self,
         aligned: pd.DataFrame,
         feat_cols: list[str],
+        binary: bool = False,
     ) -> tuple[Any, Any]:
         """
         Fit a single (raw, calibrated) LightGBM model on a pre-labeled slice.
 
         Parameters
         ----------
-        aligned   : DataFrame with feature columns and a ``label`` column (−1/0/+1).
+        aligned   : DataFrame with feature columns and a ``label`` column.
+                    3-class mode: labels in {-1, 0, +1} → offset +1 → {0, 1, 2}.
+                    Binary mode:  labels in {0, 1}       → used directly.
         feat_cols : Feature column names to use as model input.
+        binary    : If True, labels are already {0, 1} — no +1 offset applied.
 
         Returns
         -------
         (raw_model, cal_model) — cal_model may equal raw_model when calibration skipped.
         Returns (None, None) if the slice is too small to train reliably.
         """
+        offset = 0 if binary else 1    # 3-class labels {-1,0,1} need +1; binary {0,1} don't
         n       = len(aligned)
         n_lgbm  = int(n * 0.60)
         n_calib = int(n * 0.15)
@@ -220,15 +228,15 @@ class LGBMStrategy(BaseStrategy):
             if n_train < 20:
                 return None, None
             X_train = aligned.iloc[:n_train][feat_cols]
-            y_train = aligned.iloc[:n_train]["label"] + 1
+            y_train = aligned.iloc[:n_train]["label"] + offset
             X_val   = aligned.iloc[n_train:][feat_cols]
-            y_val   = aligned.iloc[n_train:]["label"] + 1
+            y_val   = aligned.iloc[n_train:]["label"] + offset
             use_early_stop = False
         else:
             X_train = aligned.iloc[:n_lgbm][feat_cols]
-            y_train = aligned.iloc[:n_lgbm]["label"] + 1
+            y_train = aligned.iloc[:n_lgbm]["label"] + offset
             X_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib][feat_cols]
-            y_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib]["label"] + 1
+            y_val   = aligned.iloc[n_lgbm : n_lgbm + n_calib]["label"] + offset
             use_early_stop = True
 
         model = lgb.LGBMClassifier(**self._lgb_params)
@@ -291,12 +299,17 @@ class LGBMStrategy(BaseStrategy):
             except Exception as e:
                 logger.debug("LGBMStrategy: macro enrichment failed: %s", e)
 
-        labels  = make_labels_rl(df, self.forward_days, self.threshold, self.commission_rate)
+        labels  = make_labels_adaptive(df, self.forward_days, self.threshold, self.commission_rate)
         aligned = df.join(labels.rename("label")).dropna()
 
         if len(aligned) < 60:
             logger.debug("LGBMStrategy: too few labeled rows for %s (%d)", symbol, len(aligned))
             return
+
+        # Binary mode: collapse SELL (-1) and HOLD (0) into NOTBUY (0)
+        if self.binary_mode:
+            aligned = aligned.copy()
+            aligned["label"] = (aligned["label"] == 1).astype(int)
 
         # ── Walk-forward ensemble ─────────────────────────────────────────
         # Train K sub-models on K temporal slices of the aligned data.
@@ -315,8 +328,8 @@ class LGBMStrategy(BaseStrategy):
         raw_model_primary: Any      = None
 
         for idx, win_size in enumerate(window_sizes):
-            aligned_slice    = aligned.iloc[-win_size:]
-            raw_m, cal_m     = self._train_one_window(aligned_slice, feat_cols)
+            aligned_slice = aligned.iloc[-win_size:]
+            raw_m, cal_m  = self._train_one_window(aligned_slice, feat_cols, binary=self.binary_mode)
             if cal_m is None:
                 continue
             ensemble.append(cal_m)
@@ -332,15 +345,24 @@ class LGBMStrategy(BaseStrategy):
         self._is_trained[symbol] = True
         self._feat_cols[symbol]  = feat_cols
 
-        dist = dict(zip(*np.unique(
-            (aligned.iloc[:int(n * 0.60)]["label"] + 1).values, return_counts=True
-        )))
-        logger.info(
-            "LGBMStrategy [%s] %s | ensemble=%d models | windows=%s | "
-            "label dist SELL:%d HOLD:%d BUY:%d",
-            self.strategy_id, symbol, len(ensemble), window_sizes[:len(ensemble)],
-            dist.get(0, 0), dist.get(1, 0), dist.get(2, 0),
-        )
+        train_labels = aligned.iloc[:int(n * 0.60)]["label"].values
+        if self.binary_mode:
+            n_buy    = int((train_labels == 1).sum())
+            n_notbuy = int((train_labels == 0).sum())
+            logger.info(
+                "LGBMStrategy [%s] %s | binary | ensemble=%d | windows=%s | "
+                "label dist NOTBUY:%d BUY:%d",
+                self.strategy_id, symbol, len(ensemble), window_sizes[:len(ensemble)],
+                n_notbuy, n_buy,
+            )
+        else:
+            dist = dict(zip(*np.unique(train_labels + 1, return_counts=True)))
+            logger.info(
+                "LGBMStrategy [%s] %s | 3-class | ensemble=%d | windows=%s | "
+                "label dist SELL:%d HOLD:%d BUY:%d",
+                self.strategy_id, symbol, len(ensemble), window_sizes[:len(ensemble)],
+                dist.get(0, 0), dist.get(1, 0), dist.get(2, 0),
+            )
 
     # ── Inference ─────────────────────────────────────────────────────────
 
@@ -369,11 +391,30 @@ class LGBMStrategy(BaseStrategy):
         latest = df.iloc[[-1]][feat_cols]
 
         # Average predicted probabilities across all K ensemble members.
-        # Each member returns shape (1, 3) → [p_sell, p_hold, p_buy].
         all_probas = np.array([m.predict_proba(latest)[0] for m in ensemble])
-        avg_proba  = all_probas.mean(axis=0)    # (3,)
-        pred       = int(np.argmax(avg_proba))  # 0=SELL  1=HOLD  2=BUY
-        conf       = float(avg_proba[pred])
+        avg_proba  = all_probas.mean(axis=0)
+
+        if self.binary_mode:
+            # Binary: avg_proba shape (2,) → [p_notbuy, p_buy]
+            p_buy = float(avg_proba[1]) if len(avg_proba) >= 2 else float(avg_proba[0])
+            if p_buy < self.min_confidence:
+                return None
+            strength = SignalStrength.STRONG if p_buy > 0.70 else SignalStrength.NORMAL
+            return self.make_signal(
+                symbol, SignalType.BUY, bar.close,
+                strength=strength,
+                metadata={
+                    "confidence": round(p_buy, 4),
+                    "p_buy":      round(p_buy, 4),
+                    "p_notbuy":   round(float(avg_proba[0]) if len(avg_proba) >= 2 else 1.0 - p_buy, 4),
+                    "model":      "lgbm_binary",
+                    "n_models":   len(ensemble),
+                },
+            )
+
+        # 3-class mode: avg_proba shape (3,) → [p_sell, p_hold, p_buy]
+        pred  = int(np.argmax(avg_proba))   # 0=SELL  1=HOLD  2=BUY
+        conf  = float(avg_proba[pred])
 
         if conf < self.min_confidence:
             return None
