@@ -283,7 +283,7 @@ class TestCausalNodeMath:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestAdvisorCausalContent:
-    EXPECTED_FACTORS = {"fundamentals", "momentum", "model_signal"}
+    EXPECTED_FACTORS = {"fundamentals", "quality_position", "model_signal"}
 
     def test_exactly_three_factors(self, _patch_recommend):
         from api.advisor import get_recommendations
@@ -297,9 +297,9 @@ class TestAdvisorCausalContent:
         from api.advisor import get_recommendations
         rows = get_recommendations(top_n=5)
         expected_weights = {
-            "fundamentals": 0.35,
-            "momentum":     0.35,
-            "model_signal": 0.30,
+            "fundamentals":     0.40,
+            "quality_position": 0.30,
+            "model_signal":     0.30,
         }
         for row in rows:
             for node in row["causal_nodes"]:
@@ -441,41 +441,55 @@ class TestFundamentalsExtras:
 # 7.  Momentum node extras
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestMomentumExtras:
-    def _get_momentum_node(self, rows: list[dict]) -> dict:
+class TestQualityPositionExtras:
+    """Tests for the quality_position causal node that replaced the old momentum node.
+
+    The anti-hot-stock scoring uses:
+      - dist_52w_high (contrarian: beaten-down beats hot)
+      - low_vol (quality / stability)
+      - ret_6m (small 6-month momentum, capped)
+    """
+
+    def _get_quality_node(self, rows: list[dict]) -> dict:
         for row in rows:
             for node in row["causal_nodes"]:
-                if node["factor"] == "momentum":
+                if node["factor"] == "quality_position":
                     return node
-        pytest.fail("No momentum node found")
+        pytest.fail("No quality_position node found")
 
     def test_extras_present(self, _patch_recommend):
         from api.advisor import get_recommendations
         rows = get_recommendations(top_n=5)
-        node = self._get_momentum_node(rows)
+        node = self._get_quality_node(rows)
         assert node.get("extras") is not None
 
-    def test_ret_keys_present(self, _patch_recommend):
+    def test_quality_keys_present(self, _patch_recommend):
         from api.advisor import get_recommendations
         rows = get_recommendations(top_n=5)
-        node = self._get_momentum_node(rows)
-        for key in ["ret_1y", "ret_3m", "ret_1m"]:
+        node = self._get_quality_node(rows)
+        for key in ["dist_52w_high", "price_52w_pct", "ret_6m", "ret_20d",
+                    "low_vol_raw", "norm_52w_dist", "norm_low_vol", "norm_6m"]:
             assert key in node["extras"], f"Missing extras key: {key}"
 
-    def test_ret_values_are_floats(self, _patch_recommend):
+    def test_quality_values_are_floats(self, _patch_recommend):
         from api.advisor import get_recommendations
         rows = get_recommendations(top_n=5)
-        node = self._get_momentum_node(rows)
-        for key in ["ret_1y", "ret_3m", "ret_1m"]:
+        node = self._get_quality_node(rows)
+        for key in ["dist_52w_high", "price_52w_pct", "ret_6m", "ret_20d",
+                    "low_vol_raw", "norm_52w_dist", "norm_low_vol", "norm_6m"]:
             assert isinstance(node["extras"][key], float), \
                 f"{key} is not float: {type(node['extras'][key])}"
 
-    def test_description_mentions_returns(self, _patch_recommend):
+    def test_description_mentions_distance_and_momentum(self, _patch_recommend):
         from api.advisor import get_recommendations
         rows = get_recommendations(top_n=5)
-        node = self._get_momentum_node(rows)
-        # Description should contain 1Y, 3M, 1M percentages
-        assert "1Y" in node["description"] or "1y" in node["description"].lower()
+        node = self._get_quality_node(rows)
+        # Description should contain 52w and 6M references
+        desc = node["description"]
+        assert "52w" in desc or "52W" in desc.upper(), \
+            f"Description missing 52w reference: {desc}"
+        assert "6M" in desc or "6m" in desc.lower(), \
+            f"Description missing 6M reference: {desc}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

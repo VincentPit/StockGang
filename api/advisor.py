@@ -37,6 +37,7 @@ from typing import Any
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import numpy as np
 import pandas as pd
 
 from api import db as _db
@@ -575,212 +576,330 @@ def analyze_stock(symbol: str, force_retrain: bool = False) -> dict:
 
 def get_recommendations(sector: str | None = None, top_n: int = 10) -> list[dict]:
     """
-    Score and rank the symbol universe (optionally filtered by sector).
+    Score and rank the live A-share universe using value-biased,
+    anti-hot-stock principles that mirror the stock screener.
 
-    Scoring formula (all components normalised 0–1):
-      score = 0.35 × fundamentals_composite
-            + 0.35 × momentum_score
-            + 0.30 × model_signal_score   (if model exists; else 0)
+    Universe
+    ────────
+    Full live CSI300 + CSI500 from fetch_universe (no hardcoded list).
+    SECTOR_MAP provides sector labels for known symbols; others get "other".
+
+    Hard filters (same as stock screener — applied before scoring):
+      • 20-day gain > 25%    → excluded (hot-stock surge)
+      • price_52w_pct > 90%  → excluded (near 52-week peak)
+
+    Scoring formula (all components cross-sectionally normalised 0–1):
+      composite = 0.40 × fundamentals_composite
+                + 0.30 × model_signal_score   (stored LGBM; 0.5 if absent)
+                + 0.30 × quality_position
+
+      quality_position = 0.45 × dist_52w_high   (contrarian: beaten-down beats hot)
+                       + 0.35 × low_vol          (quality / stability)
+                       + 0.20 × ret_6m_norm      (small 6-month momentum, capped ±30%)
 
     ``model_signal_score`` uses the *stored* LGBM signal — no live training
     is triggered here so recommendations are always fast.
 
-    Returns a list of dicts sorted by descending score.
+    Returns a list of dicts sorted by descending composite score.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from api.runner import get_fundamentals_sync, get_price_sync
-    from myquant.strategy.ml.feature_engineer import FEATURE_COLS, bars_to_features
-
-    # Build universe from the curated SECTOR_MAP so every hand-picked stock is
-    # scored regardless of the current CSI300/CSI500 constituent snapshot.
-    # We fetch both indices only for name / yf_ticker resolution; the actual
-    # set of symbols scored is always exactly SECTOR_MAP (optionally filtered).
+    from myquant.strategy.ml.feature_engineer import bars_to_features
     from myquant.data.fetchers.universe_fetcher import fetch_universe
-    from myquant.data.fetchers.historical_loader import _symbol_to_yfinance
+
+    # ── Universe: full live CSI300 + CSI500 (sector from SECTOR_MAP or "other") ─
     _raw = fetch_universe(indices=["000300", "000905"])
-    _index_lookup: dict[str, tuple[str, str]] = {
-        r["sym"]: (r["yf_ticker"], r["name"]) for r in _raw
-    }
-    universe: dict[str, tuple[str, str]] = {}
-    for _sym, _sym_sector in SECTOR_MAP.items():
-        if sector is not None and _sym_sector != sector:
+    universe: list[dict] = []
+    for r in _raw:
+        sym = r["sym"]
+        sym_sector = SECTOR_MAP.get(sym, "other")
+        if sector is not None and sym_sector != sector:
             continue
-        if _sym in _index_lookup:
-            universe[_sym] = _index_lookup[_sym]
-        else:
-            # Fallback for stocks absent from both index snapshots
-            _yf = _symbol_to_yfinance(_sym)
-            universe[_sym] = (_yf or _sym, _sym)
+        universe.append({
+            "sym":       sym,
+            "yf_ticker": r["yf_ticker"],
+            "name":      r["name"],
+            "sector":    sym_sector,
+        })
 
-    rows: list[dict] = []
-
-    for sym, (yf_ticker, name) in universe.items():
+    # ── First pass: collect raw metrics concurrently ───────────────────────────
+    def _fetch_one(entry: dict) -> dict | None:
+        """Fetch price + fundamentals + stored model signal for one symbol."""
+        sym = entry["sym"]
         try:
-            # ── Price / momentum ──────────────────────────────────────────
-            price_data = get_price_sync(sym, days=365)
+            price_data = get_price_sync(sym, days=400)
             bars_list  = price_data.get("bars", [])
             if len(bars_list) < 30:
-                continue
+                return None
 
             closes = [b["close"] for b in bars_list]
-            ret_1y = (closes[-1] / closes[0] - 1) if closes[0] else 0.0
-            ret_3m = (closes[-1] / closes[max(0, len(closes)-63)] - 1)
-            ret_1m = (closes[-1] / closes[max(0, len(closes)-20)] - 1)
-            mom_raw = 0.4 * ret_3m + 0.4 * ret_1y + 0.2 * ret_1m
+            n = len(closes)
 
-            # ── Fundamentals ──────────────────────────────────────────────
-            fund = get_fundamentals_sync(sym)
+            # ── Hot-stock filter metrics ───────────────────────────────────
+            ret_20d = (closes[-1] / closes[max(0, n - 20)] - 1) if n >= 20 else 0.0
+            hi52    = max(closes[max(0, n - 252):])
+            lo52    = min(closes[max(0, n - 252):])
+            price_52w_pct = (closes[-1] - lo52) / (hi52 - lo52 + 1e-10)
+            dist_52w_high = max(0.0, (hi52 - closes[-1]) / (hi52 + 1e-10))
+
+            # ── Low-volatility metric (annualised daily vol, inverted) ──────
+            window      = closes[max(0, n - 252):]
+            daily_rets  = [window[i] / window[i - 1] - 1 for i in range(1, len(window))]
+            vol_annual  = float(np.std(daily_rets)) * (252 ** 0.5) if len(daily_rets) >= 20 else 0.20
+            low_vol_raw = 1.0 / (1.0 + vol_annual)   # higher = less volatile = better
+
+            # ── Return metrics ─────────────────────────────────────────────
+            ret_6m = (closes[-1] / closes[max(0, n - 126)] - 1) if n >= 30 else 0.0
+            ret_1y = (closes[-1] / closes[0] - 1)               if closes[0] else 0.0
+            ret_3m = (closes[-1] / closes[max(0, n - 63)]  - 1)
+            ret_1m = (closes[-1] / closes[max(0, n - 20)]  - 1)
+
+            # ── Fundamentals ───────────────────────────────────────────────
+            fund    = get_fundamentals_sync(sym)
             f_score = (
                 fund.get("value_score", 0)
                 + fund.get("growth_score", 0)
                 + fund.get("quality_score", 0)
-            ) / 3.0  # already 0–100 scale
+            ) / 3.0
 
-            # ── Model signal (if available) ────────────────────────────────
-            model_sig = 0.5   # neutral baseline
+            # ── Stored model signal (no live training) ─────────────────────
+            model_sig        = 0.5
             model_confidence = 0.0
             model_signal_str = "N/A"
             p_buy_snap, p_hold_snap, p_sell_snap = 0.0, 1.0, 0.0
-
             stored = _db.load_model(sym, STRATEGY_ID)
             if stored is not None:
                 try:
                     blob, meta = stored
-                    m     = pickle.loads(blob)
-                    df    = _load_bars_df(sym, days=LOOKBACK_DAYS)
-                    bl    = _df_to_bars(sym, df) if not df.empty else []
-                    fdf   = bars_to_features(bl) if bl else pd.DataFrame()
-                    sig   = _predict_signal(m, fdf, meta["feature_cols"])
-                    # Map signal → 0–1 score: BUY=1, HOLD=0.5, SELL=0
-                    sig_map = {"BUY": 1.0, "HOLD": 0.5, "SELL": 0.0}
-                    model_sig         = sig_map[sig["signal"]]
-                    model_confidence  = sig["confidence"]
-                    model_signal_str  = sig["signal"]
-                    p_buy_snap        = sig["p_buy"]
-                    p_hold_snap       = sig["p_hold"]
-                    p_sell_snap       = sig["p_sell"]
+                    m   = pickle.loads(blob)
+                    df  = _load_bars_df(sym, days=LOOKBACK_DAYS)
+                    bl  = _df_to_bars(sym, df) if not df.empty else []
+                    fdf = bars_to_features(bl) if bl else pd.DataFrame()
+                    sig = _predict_signal(m, fdf, meta["feature_cols"])
+                    sig_map          = {"BUY": 1.0, "HOLD": 0.5, "SELL": 0.0}
+                    model_sig        = sig_map[sig["signal"]]
+                    model_confidence = sig["confidence"]
+                    model_signal_str = sig["signal"]
+                    p_buy_snap       = sig["p_buy"]
+                    p_hold_snap      = sig["p_hold"]
+                    p_sell_snap      = sig["p_sell"]
                 except Exception:
                     pass
 
-            # ── Composite score ────────────────────────────────────────────
-            # Normalise fundamentals to 0–1 (was 0–100)
-            f_norm   = min(f_score / 100.0, 1.0)
-            # Clip momentum to ±50% range, normalise to 0–1
-            m_norm   = (min(max(mom_raw, -0.5), 0.5) + 0.5)
-
-            composite = 0.35 * f_norm + 0.35 * m_norm + 0.30 * model_sig
-
-            # ── Data scope (price window used) ────────────────────────────
-            _ret_scope = (closes[-1] - closes[0]) / closes[0] if closes[0] else 0
-            data_scope = {
-                "start_date":  bars_list[0]["date"] if bars_list else "",
-                "end_date":    bars_list[-1]["date"] if bars_list else "",
-                "bars":        len(bars_list),
-                "price_start": round(float(closes[0]), 2)   if closes else 0,
-                "price_end":   round(float(closes[-1]), 2)  if closes else 0,
-                "price_min":   round(float(min(closes)), 2) if closes else 0,
-                "price_max":   round(float(max(closes)), 2) if closes else 0,
-                "trend": (
-                    "UPTREND"   if _ret_scope > 0.05 else
-                    "DOWNTREND" if _ret_scope < -0.05 else
-                    "SIDEWAYS"
-                ),
+            return {
+                "sym":             sym,
+                "yf_ticker":       entry["yf_ticker"],
+                "name":            entry["name"],
+                "sector":          entry["sector"],
+                "closes":          closes,
+                "bars_list":       bars_list,
+                "ret_20d":         ret_20d,
+                "price_52w_pct":   price_52w_pct,
+                "dist_52w_high":   dist_52w_high,
+                "low_vol_raw":     low_vol_raw,
+                "ret_6m":          ret_6m,
+                "ret_1y":          ret_1y,
+                "ret_3m":          ret_3m,
+                "ret_1m":          ret_1m,
+                "f_score":         f_score,
+                "fund":            fund,
+                "model_sig":       model_sig,
+                "model_confidence":model_confidence,
+                "model_signal_str":model_signal_str,
+                "p_buy_snap":      p_buy_snap,
+                "p_hold_snap":     p_hold_snap,
+                "p_sell_snap":     p_sell_snap,
+                "stored":          stored,
             }
-
-            # ── Causal trace ───────────────────────────────────────────────
-            causal_nodes = [
-                {
-                    "factor":       "fundamentals",
-                    "label":        "Fundamentals",
-                    "description":  (
-                        f"Value {fund.get('value_score', 0):.0f} · "
-                        f"Growth {fund.get('growth_score', 0):.0f} · "
-                        f"Quality {fund.get('quality_score', 0):.0f}  "
-                        f"(composite {f_score:.1f}/100)"
-                    ),
-                    "raw_value":    round(f_score, 2),
-                    "norm_value":   round(f_norm, 4),
-                    "weight":       0.35,
-                    "contribution": round(0.35 * f_norm, 4),
-                    "direction":    "positive" if f_norm >= 0.55 else "negative" if f_norm < 0.35 else "neutral",
-                    "percentile":   "",
-                    "extras": {
-                        "pe_ttm":        fund.get("pe_ttm", 0),
-                        "pb":            fund.get("pb", 0),
-                        "roe":           fund.get("roe", 0),
-                        "value_score":   fund.get("value_score", 0),
-                        "growth_score":  fund.get("growth_score", 0),
-                        "quality_score": fund.get("quality_score", 0),
-                    },
-                },
-                {
-                    "factor":       "momentum",
-                    "label":        "Price Momentum",
-                    "description":  f"1Y {ret_1y:+.1%} · 3M {ret_3m:+.1%} · 1M {ret_1m:+.1%}",
-                    "raw_value":    round(mom_raw, 4),
-                    "norm_value":   round(m_norm, 4),
-                    "weight":       0.35,
-                    "contribution": round(0.35 * m_norm, 4),
-                    "direction":    "positive" if m_norm >= 0.55 else "negative" if m_norm < 0.45 else "neutral",
-                    "percentile":   "",
-                    "extras": {
-                        "ret_1y": round(ret_1y, 4),
-                        "ret_3m": round(ret_3m, 4),
-                        "ret_1m": round(ret_1m, 4),
-                    },
-                },
-                {
-                    "factor":       "model_signal",
-                    "label":        "ML Signal (LightGBM)",
-                    "description":  (
-                        f"Signal: {model_signal_str} with {model_confidence:.0%} confidence"
-                        if model_signal_str != "N/A"
-                        else "No trained model — using neutral baseline (0.5)"
-                    ),
-                    "raw_value":    model_signal_str,
-                    "norm_value":   round(model_sig, 4),
-                    "weight":       0.30,
-                    "contribution": round(0.30 * model_sig, 4),
-                    "direction":    "positive" if model_sig >= 0.7 else "negative" if model_sig < 0.3 else "neutral",
-                    "percentile":   "",
-                    "extras": {
-                        "signal":        model_signal_str,
-                        "confidence":    round(model_confidence, 4),
-                        "model_trained": stored is not None,
-                        "p_buy":         p_buy_snap,
-                        "p_hold":        p_hold_snap,
-                        "p_sell":        p_sell_snap,
-                    },
-                },
-            ]
-
-            rows.append({
-                "symbol":           sym,
-                "yf_ticker":        yf_ticker,
-                "name":             name,
-                "sector":           SECTOR_MAP.get(sym, "unknown"),
-                "score":            round(composite, 4),
-                "model_signal":     model_signal_str,
-                "model_confidence": round(model_confidence, 4),
-                "model_trained":    stored is not None,
-                "ret_1y":           round(ret_1y, 4),
-                "ret_3m":           round(ret_3m, 4),
-                "ret_1m":           round(ret_1m, 4),
-                "fundamentals": {
-                    "pe_ttm":         fund.get("pe_ttm", 0),
-                    "pb":             fund.get("pb", 0),
-                    "roe":            fund.get("roe", 0),
-                    "revenue_growth": fund.get("revenue_growth", 0),
-                    "net_margin":     fund.get("net_margin", 0),
-                    "value_score":    fund.get("value_score", 0),
-                    "growth_score":   fund.get("growth_score", 0),
-                    "quality_score":  fund.get("quality_score", 0),
-                },
-                "causal_nodes": causal_nodes,
-                "data_scope":   data_scope,
-            })
         except Exception:
-            # Skip symbols that fail — don't let one bad fetch break the whole list
+            return None
+
+    raw_rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = {pool.submit(_fetch_one, e): e for e in universe}
+        for fut in as_completed(futures):
+            result = fut.result()
+            if result is not None:
+                raw_rows.append(result)
+
+    # ── Hard filters: block hot stocks & near-peak stocks (mirrors screener) ───
+    hot_excluded: list[str] = []
+    filtered: list[dict] = []
+    for r in raw_rows:
+        if r["ret_20d"] > 0.25:
+            hot_excluded.append(f"{r['sym']} (20d +{r['ret_20d']:.0%})")
             continue
+        if r["price_52w_pct"] > 0.90:
+            hot_excluded.append(f"{r['sym']} (52w pos {r['price_52w_pct']:.0%})")
+            continue
+        filtered.append(r)
+
+    if hot_excluded:
+        _log.info(
+            "Recommendations: hot-stock filter excluded %d: %s",
+            len(hot_excluded), ", ".join(hot_excluded[:8]),
+        )
+    if not filtered:
+        filtered = raw_rows  # safety fallback — score everything if all excluded
+    if not filtered:
+        return []  # nothing to score (e.g. unknown sector, or all data failures)
+
+    # ── Cross-sectional min-max normalisation ─────────────────────────────────
+    def _minmax(vals: list[float]) -> list[float]:
+        lo, hi = min(vals), max(vals)
+        return [0.5] * len(vals) if hi == lo else [(v - lo) / (hi - lo) for v in vals]
+
+    if len(filtered) == 1:
+        norm_52w_dist = [0.5]
+        norm_low_vol  = [0.5]
+        norm_6m       = [0.5]
+    else:
+        norm_52w_dist = _minmax([r["dist_52w_high"]                          for r in filtered])  # further from peak = better
+        norm_low_vol  = _minmax([r["low_vol_raw"]                            for r in filtered])  # less volatile = better
+        norm_6m       = _minmax([min(max(r["ret_6m"], -0.30), 0.30)         for r in filtered])  # 6M momentum, capped
+
+    # ── Build final scored rows ────────────────────────────────────────────────
+    rows: list[dict] = []
+    for i, r in enumerate(filtered):
+        sym   = r["sym"]
+        fund  = r["fund"]
+        closes = r["closes"]
+        bars_list = r["bars_list"]
+
+        f_norm = min(r["f_score"] / 100.0, 1.0)
+
+        # Quality/contrarian position score (anti-hot-stock):
+        #   45% distance from 52w high (contrarian: beaten-down beats hot)
+        #   35% low volatility (quality / stability)
+        #   20% small 6M momentum (capped, cross-sectionally normalised)
+        q_score = (
+            0.45 * norm_52w_dist[i]
+            + 0.35 * norm_low_vol[i]
+            + 0.20 * norm_6m[i]
+        )
+
+        composite = 0.40 * f_norm + 0.30 * r["model_sig"] + 0.30 * q_score
+
+        ret_1y = r["ret_1y"]
+        ret_3m = r["ret_3m"]
+        ret_1m = r["ret_1m"]
+
+        _ret_scope = (closes[-1] - closes[0]) / closes[0] if closes[0] else 0
+        data_scope = {
+            "start_date":  bars_list[0]["date"] if bars_list else "",
+            "end_date":    bars_list[-1]["date"] if bars_list else "",
+            "bars":        len(bars_list),
+            "price_start": round(float(closes[0]), 2)   if closes else 0,
+            "price_end":   round(float(closes[-1]), 2)  if closes else 0,
+            "price_min":   round(float(min(closes)), 2) if closes else 0,
+            "price_max":   round(float(max(closes)), 2) if closes else 0,
+            "trend": (
+                "UPTREND"   if _ret_scope > 0.05 else
+                "DOWNTREND" if _ret_scope < -0.05 else
+                "SIDEWAYS"
+            ),
+        }
+
+        causal_nodes = [
+            {
+                "factor":       "fundamentals",
+                "label":        "Fundamentals",
+                "description":  (
+                    f"Value {fund.get('value_score', 0):.0f} · "
+                    f"Growth {fund.get('growth_score', 0):.0f} · "
+                    f"Quality {fund.get('quality_score', 0):.0f}  "
+                    f"(composite {r['f_score']:.1f}/100)"
+                ),
+                "raw_value":    round(r["f_score"], 2),
+                "norm_value":   round(f_norm, 4),
+                "weight":       0.40,
+                "contribution": round(0.40 * f_norm, 4),
+                "direction":    "positive" if f_norm >= 0.55 else "negative" if f_norm < 0.35 else "neutral",
+                "percentile":   "",
+                "extras": {
+                    "pe_ttm":        fund.get("pe_ttm", 0),
+                    "pb":            fund.get("pb", 0),
+                    "roe":           fund.get("roe", 0),
+                    "value_score":   fund.get("value_score", 0),
+                    "growth_score":  fund.get("growth_score", 0),
+                    "quality_score": fund.get("quality_score", 0),
+                },
+            },
+            {
+                "factor":       "model_signal",
+                "label":        "ML Signal (LightGBM)",
+                "description":  (
+                    f"Signal: {r['model_signal_str']} with {r['model_confidence']:.0%} confidence"
+                    if r["model_signal_str"] != "N/A"
+                    else "No trained model — using neutral baseline (0.5)"
+                ),
+                "raw_value":    r["model_signal_str"],
+                "norm_value":   round(r["model_sig"], 4),
+                "weight":       0.30,
+                "contribution": round(0.30 * r["model_sig"], 4),
+                "direction":    "positive" if r["model_sig"] >= 0.7 else "negative" if r["model_sig"] < 0.3 else "neutral",
+                "percentile":   "",
+                "extras": {
+                    "signal":        r["model_signal_str"],
+                    "confidence":    round(r["model_confidence"], 4),
+                    "model_trained": r["stored"] is not None,
+                    "p_buy":         r["p_buy_snap"],
+                    "p_hold":        r["p_hold_snap"],
+                    "p_sell":        r["p_sell_snap"],
+                },
+            },
+            {
+                "factor":       "quality_position",
+                "label":        "Quality Positioning",
+                "description":  (
+                    f"Dist from 52w high: {r['dist_52w_high']:.0%} · "
+                    f"6M return: {r['ret_6m']:+.1%} · "
+                    f"52w position: {r['price_52w_pct']:.0%}"
+                ),
+                "raw_value":    round(q_score, 4),
+                "norm_value":   round(q_score, 4),
+                "weight":       0.30,
+                "contribution": round(0.30 * q_score, 4),
+                "direction":    "positive" if q_score >= 0.55 else "negative" if q_score < 0.35 else "neutral",
+                "percentile":   "",
+                "extras": {
+                    "dist_52w_high": round(r["dist_52w_high"], 4),
+                    "price_52w_pct": round(r["price_52w_pct"], 4),
+                    "ret_6m":        round(r["ret_6m"], 4),
+                    "ret_20d":       round(r["ret_20d"], 4),
+                    "low_vol_raw":   round(r["low_vol_raw"], 4),
+                    "norm_52w_dist": round(norm_52w_dist[i], 4),
+                    "norm_low_vol":  round(norm_low_vol[i], 4),
+                    "norm_6m":       round(norm_6m[i], 4),
+                },
+            },
+        ]
+
+        rows.append({
+            "symbol":           sym,
+            "yf_ticker":        r["yf_ticker"],
+            "name":             r["name"],
+            "sector":           r["sector"],
+            "score":            round(composite, 4),
+            "model_signal":     r["model_signal_str"],
+            "model_confidence": round(r["model_confidence"], 4),
+            "model_trained":    r["stored"] is not None,
+            "ret_1y":           round(ret_1y, 4),
+            "ret_3m":           round(ret_3m, 4),
+            "ret_1m":           round(ret_1m, 4),
+            "fundamentals": {
+                "pe_ttm":         fund.get("pe_ttm", 0),
+                "pb":             fund.get("pb", 0),
+                "roe":            fund.get("roe", 0),
+                "revenue_growth": fund.get("revenue_growth", 0),
+                "net_margin":     fund.get("net_margin", 0),
+                "value_score":    fund.get("value_score", 0),
+                "growth_score":   fund.get("growth_score", 0),
+                "quality_score":  fund.get("quality_score", 0),
+            },
+            "causal_nodes": causal_nodes,
+            "data_scope":   data_scope,
+        })
 
     rows.sort(key=lambda r: r["score"], reverse=True)
     return rows[:top_n]
