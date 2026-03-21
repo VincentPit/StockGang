@@ -352,6 +352,28 @@ def screen(
     W_TREND, W_ATR, W_AUTOCORR, W_MOM6M, W_DD, W_LOW_VOL, W_DIST_52W, W_YANG = (
         0.20, 0.10, 0.10, 0.05, 0.20, 0.15, 0.10, 0.10
     )
+
+    # ── Auto-load tuned weights written by train_loop.py ─────────────────────
+    # When train_loop finds that no stock is profitable, it nudges these weights
+    # toward safety and writes screener_weights.json.  Reload happens on every
+    # screen() call so the change takes effect immediately without a code edit.
+    import json as _j
+    _sw_path = Path(__file__).parent.parent.parent / "screener_weights.json"
+    if _sw_path.exists():
+        try:
+            _sw = _j.loads(_sw_path.read_text())
+            W_TREND    = float(_sw.get("W_TREND",    W_TREND))
+            W_ATR      = float(_sw.get("W_ATR",      W_ATR))
+            W_AUTOCORR = float(_sw.get("W_AUTOCORR", W_AUTOCORR))
+            W_MOM6M    = float(_sw.get("W_MOM6M",    W_MOM6M))
+            W_DD       = float(_sw.get("W_DD",       W_DD))
+            W_LOW_VOL  = float(_sw.get("W_LOW_VOL",  W_LOW_VOL))
+            W_DIST_52W = float(_sw.get("W_DIST_52W", W_DIST_52W))
+            W_YANG     = float(_sw.get("W_YANG",     W_YANG))
+            if verbose:
+                print(f"  [train_loop weights loaded from {_sw_path.name}]")
+        except Exception:
+            pass
     for i, r in enumerate(results):
         nt, na, nac, n6, ndd, nlv, n52, nyang = (
             norm_trend[i], norm_atr[i], norm_autocorr[i], norm_6m[i], norm_dd[i],

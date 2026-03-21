@@ -164,6 +164,26 @@ def _backtest_core(symbols: list, req: dict) -> dict:
     Runs the full backtest pipeline and returns a plain result dict.
     Does NOT touch _jobs — callers handle status updates.
     """
+    # ── Load best_params.json written by train_loop.py (if present) ───────────
+    # The training loop optimises model and risk params across the full param grid
+    # and saves the winning configuration here.  Params in the file silently
+    # override the hard-coded defaults below; the user-supplied ``req`` values
+    # still take precedence for explicit risk overrides (stop_loss_pct, etc.).
+    import json as _json
+    _bp: dict = {}
+    _bp_path = Path(__file__).parent.parent / "best_params.json"
+    if _bp_path.exists():
+        try:
+            _bp = _json.loads(_bp_path.read_text())
+            _log.info(
+                "_backtest_core: loaded best_params.json → conf=%.2f thresh=%.3f hold=%d",
+                _bp.get("min_confidence", 0.60),
+                _bp.get("threshold",      0.015),
+                _bp.get("min_hold_bars",  5),
+            )
+        except Exception as _e:
+            _log.warning("_backtest_core: could not parse best_params.json: %s", _e)
+
     from myquant.backtest.simulator import Backtester, BacktestConfig
     from myquant.models.bar import BarInterval
     from myquant.strategy.ml.lgbm_strategy import LGBMStrategy
@@ -189,18 +209,18 @@ def _backtest_core(symbols: list, req: dict) -> dict:
         train_years       = 2,
         stop_loss_pct     = req["stop_loss_pct"],
         symbol_loss_cap   = req["symbol_loss_cap"],
-        trailing_stop_pct = req.get("trailing_stop_pct", 0.0),
-        take_profit_pct   = req.get("take_profit_pct", 0.0),
+        trailing_stop_pct = req.get("trailing_stop_pct") or _bp.get("trailing_stop_pct", 0.0),
+        take_profit_pct   = req.get("take_profit_pct")   or _bp.get("take_profit_pct",   0.0),
     )
 
     lgbm = LGBMStrategy(
         strategy_id="lgbm_core", symbols=symbols,
-        forward_days=5, threshold=0.015, train_ratio=0.70,
-        min_confidence=0.60,   # raised from 0.52 — require stronger conviction
+        forward_days=5, threshold=_bp.get("threshold", 0.015), train_ratio=0.70,
+        min_confidence=_bp.get("min_confidence", 0.60),
         retrain_every=21, max_train_bars=504,
         use_macro=False, num_leaves=31, n_estimators=300,
-        min_hold_bars=5,                             # cooldown: 5 bars between signals
-        commission_rate=req.get("commission_rate", 0.0003),  # cost-aware labels
+        min_hold_bars=_bp.get("min_hold_bars", 5),
+        commission_rate=req.get("commission_rate", _bp.get("commission_rate", 0.0003)),
     )
     backtester = (
         Backtester(config)
