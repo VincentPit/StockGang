@@ -467,6 +467,7 @@ def _train_loop_response(job: dict) -> TrainLoopResponse:
         pct           = job.get("pct"),
         step          = job.get("step"),
         found_passing = job.get("found_passing"),
+        rounds_run    = job.get("rounds_run"),
         best_symbol   = job.get("best_symbol"),
         best_config   = job.get("best_config"),
         best_pf       = job.get("best_pf"),

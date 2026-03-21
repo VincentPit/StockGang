@@ -473,11 +473,11 @@ class AccountInfo(BaseModel):
 class TrainLoopRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    symbols:      Optional[list[str]] = None   # skip screener if provided
-    top_n:        int   = Field(default=3, ge=1, le=10)
-    lookback_days:int   = Field(default=180, ge=30, le=730)
-    train_years:  int   = Field(default=1, ge=1, le=3)
-    configs:      str   = Field(default="fast", pattern="^(fast|all)$")
+    symbols:    Optional[list[str]] = None   # skip screener if provided
+    top_n:      int = Field(default=3, ge=1, le=10,
+                            description="Round-1 top-N screener picks; expands automatically each round")
+    max_rounds: int = Field(default=5, ge=1, le=5,
+                            description="Self-test rounds (1=quick baseline … 5=max data+grid)")
 
     @field_validator("symbols")
     @classmethod
@@ -510,6 +510,7 @@ class TrainLoopResponse(BaseModel):
     pct:           Optional[int]   = None
     step:          Optional[str]   = None
     found_passing: Optional[bool]  = None
+    rounds_run:    Optional[int]   = None   # how many self-test rounds were executed
     best_symbol:   Optional[str]   = None
     best_config:   Optional[str]   = None
     best_pf:       Optional[float] = None
