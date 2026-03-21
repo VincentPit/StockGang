@@ -568,6 +568,30 @@ class TestStrategyBandit:
         # Cold (unexplored) gets a higher UCB bonus than neutral-updated active
         assert w_cold >= w_active, "Unexplored strategy should get UCB exploration bonus"
 
+    def test_symbol_weight_cold_returns_strategy_weight(self):
+        """get_weight with symbol falls back to strategy weight when no symbol trades."""
+        b = self._bandit(["lgbm"])
+        for _ in range(5):
+            b.update("lgbm", 2000.0)    # strategy-level only, no symbol arg
+        w_no_sym   = b.get_weight("lgbm")
+        w_with_sym = b.get_weight("lgbm", symbol="sh600871")
+        assert w_no_sym == w_with_sym, (
+            "Cold symbol should fall back to strategy-level weight"
+        )
+
+    def test_symbol_weight_adapts_independently(self):
+        """Per-symbol weights adapt independently — winning symbol outweighs losing one."""
+        b = self._bandit(["lgbm"])
+        for _ in range(5):
+            b.update("lgbm", 3000.0, symbol="sh000001")    # sym A: consistent wins
+            b.update("lgbm", -2000.0, symbol="sh600871")   # sym B: consistent losses
+        w_good = b.get_weight("lgbm", symbol="sh000001")
+        w_bad  = b.get_weight("lgbm", symbol="sh600871")
+        assert w_good > w_bad, "Winning symbol should outweigh losing symbol"
+        from myquant.strategy.rl.bandit import _WEIGHT_MIN, _WEIGHT_MAX
+        assert _WEIGHT_MIN <= w_good <= _WEIGHT_MAX
+        assert _WEIGHT_MIN <= w_bad  <= _WEIGHT_MAX
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TestMakeLabelsRL — cost-aware labels

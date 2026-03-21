@@ -294,7 +294,7 @@ class Backtester:
                 # Apply RL bandit weight: strategies with better recent P&L get
                 # a confidence boost; under-performers get a small penalty.
                 # Weight is 1.0 at cold-start so it has no effect until trades close.
-                bandit_weight = self._bandit.get_weight(signal.strategy_id)
+                bandit_weight = self._bandit.get_weight(signal.strategy_id, symbol=signal.symbol)
                 adj_conf = min(1.0, adj_conf * bandit_weight)
 
                 # Suppress new longs in RISK_OFF unless model is very confident
@@ -421,7 +421,7 @@ class Backtester:
                 )
                 # Update bandit with realized P&L for the opening strategy
                 open_strat = self._position_open_strat.pop(order.symbol, order.strategy_id)
-                self._bandit.update(open_strat, realized)
+                self._bandit.update(open_strat, realized, symbol=order.symbol)
                 logger.debug(
                     "Bandit ← [%s] realized=%.0f | weights=%s",
                     open_strat, realized,

@@ -197,7 +197,7 @@ def _backtest_core(symbols: list, req: dict) -> dict:
         strategy_id="lgbm_core", symbols=symbols,
         forward_days=5, threshold=0.015, train_ratio=0.70,
         min_confidence=0.60,   # raised from 0.52 — require stronger conviction
-        retrain_every=63, max_train_bars=504,
+        retrain_every=21, max_train_bars=504,
         use_macro=False, num_leaves=31, n_estimators=300,
         min_hold_bars=5,                             # cooldown: 5 bars between signals
         commission_rate=req.get("commission_rate", 0.0003),  # cost-aware labels
