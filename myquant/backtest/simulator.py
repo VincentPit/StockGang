@@ -425,7 +425,7 @@ class Backtester:
                 logger.debug(
                     "Bandit ← [%s] realized=%.0f | weights=%s",
                     open_strat, realized,
-                    {k: round(v, 2) for k, v in self._bandit.weights_summary().items()},
+                    {k: v["weight"] for k, v in self._bandit.weights_summary().items()},
                 )
 
     def _build_result(self, nav_records: list) -> BacktestResult:
