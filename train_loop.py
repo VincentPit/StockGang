@@ -112,8 +112,11 @@ def _score(r: dict) -> float:
     pf  = r.get("profit_factor", 0.0)
     wr  = r.get("win_rate",      0.0)
     pnl = r.get("total_pnl",     0.0)
-    # Primary: profit_factor  Secondary: win_rate  Tertiary: positive PnL
-    return pf * 10.0 + wr * 5.0 + (1.0 if pnl > 0 else -0.5)
+    base = pf * 10.0 + wr * 5.0 + (1.0 if pnl > 0 else -0.5)
+    # Passing trials always beat non-passing — 1000 pt bonus guarantees it
+    if _passes(r):
+        base += 1000.0
+    return base
 
 
 # ── One backtest trial ────────────────────────────────────────────────────────

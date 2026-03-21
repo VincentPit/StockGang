@@ -511,7 +511,10 @@ class Backtester:
         avg_loss      = sum(loss_pnls) / num_loss  if num_loss  > 0 else 0.0
         gross_profit  = sum(win_pnls)
         gross_loss    = abs(sum(loss_pnls))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+        profit_factor = (
+            gross_profit / gross_loss if gross_loss > 0
+            else (99.99 if gross_profit > 0 else 0.0)
+        )
 
         total_pnl = self._portfolio.total_pnl
 
