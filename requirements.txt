@@ -17,6 +17,7 @@ polars>=0.20.0           # Optional: fast alternative to pandas
 ta>=0.11.0               # Pure-Python TA (TA-Lib alternative)
 
 # ── Data Sources ─────────────────────────────────────────────
+yfinance>=0.2.40         # Yahoo Finance market data (used by screener + tests)
 akshare>=1.12.0          # Free: A/HK/US market data
 tushare>=1.2.89          # Tushare Pro (A-share data, requires token)
 
