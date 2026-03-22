@@ -36,8 +36,7 @@ function SignalBadge({ signal }: { signal: string }) {
 }
 
 // ── Analyse tab ───────────────────────────────────────────────────────────────
-function AnalyseTab() {
-  const [symbol, setSymbol] = useState("sh600519");
+function AnalyseTab({ symbol, onSymbolChange }: { symbol: string; onSymbolChange: (s: string) => void }) {
   const [forceRetrain, setForceRetrain] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -77,7 +76,7 @@ function AnalyseTab() {
           <input
             className="w-full rounded bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-indigo-500"
             value={symbol}
-            onChange={e => setSymbol(e.target.value)}
+            onChange={e => onSymbolChange(e.target.value)}
             placeholder="sh600519"
           />
         </div>
@@ -333,7 +332,7 @@ function RecommendTab() {
 }
 
 // ── Models tab ────────────────────────────────────────────────────────────────
-function ModelsTab() {
+function ModelsTab({ onAnalyse }: { onAnalyse: (symbol: string) => void }) {
   const [models, setModels] = useState<StoredModelInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -385,12 +384,12 @@ function ModelsTab() {
       )}
 
       {models.length === 0 && !loading && (
-        <p className="text-sm text-gray-500">No stored models yet. Run Analyse to train one.</p>
+        <p className="text-sm text-gray-500">No stored models yet — run the <span className="text-indigo-400 font-medium">Train Loop</span> (step 1) to train your first model.</p>
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {models.map(m => (
-          <ModelExplainerCard key={m.model_id} model={m} onDelete={handleDelete} />
+          <ModelExplainerCard key={m.model_id} model={m} onDelete={handleDelete} onAnalyse={onAnalyse} />
         ))}
       </div>
     </div>
@@ -401,8 +400,22 @@ function ModelsTab() {
 const TABS = ["Analyse", "Recommend", "Models"] as const;
 type Tab = typeof TABS[number];
 
-export default function AdvisorPanel() {
-  const [tab, setTab] = useState<Tab>("Analyse");
+export default function AdvisorPanel({ initialSymbol }: { initialSymbol?: string }) {
+  const [tab, setTab] = useState<Tab>(initialSymbol ? "Analyse" : "Models");
+  const [symbol, setSymbol] = useState(initialSymbol ?? "sh600519");
+
+  // When parent passes a new symbol (user clicked a model chip), switch to Analyse
+  useEffect(() => {
+    if (initialSymbol) {
+      setSymbol(initialSymbol);
+      setTab("Analyse");
+    }
+  }, [initialSymbol]);
+
+  const goAnalyse = useCallback((sym: string) => {
+    setSymbol(sym);
+    setTab("Analyse");
+  }, []);
 
   return (
     <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5 space-y-5">
@@ -429,9 +442,9 @@ export default function AdvisorPanel() {
       </div>
 
       <div>
-        {tab === "Analyse" && <AnalyseTab />}
+        {tab === "Analyse" && <AnalyseTab symbol={symbol} onSymbolChange={setSymbol} />}
         {tab === "Recommend" && <RecommendTab />}
-        {tab === "Models" && <ModelsTab />}
+        {tab === "Models" && <ModelsTab onAnalyse={goAnalyse} />}
       </div>
     </div>
   );

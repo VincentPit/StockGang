@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
 import clsx from "clsx";
-import { BarChart2, Search, GitMerge, Brain, Repeat2, ChevronRight, X } from "lucide-react";
+import { BarChart2, Search, GitMerge, Brain, Repeat2, ChevronRight, X, RefreshCw } from "lucide-react";
+import { listModels } from "@/lib/api";
+import type { StoredModelInfo } from "@/lib/api";
 
 // All panels lazy-loaded (no SSR) to avoid hydration issues with Recharts
 const BacktestPanel   = dynamic(() => import("@/components/BacktestPanel"),   { ssr: false });
@@ -63,6 +65,68 @@ const FLOW_STEPS = [
   { step: 3, tab: "workflow"  as TabId, label: "Workflow",    note: "screen + backtest in one click"    },
 ];
 
+function fmtModelDate(ts?: number) {
+  if (!ts) return "";
+  return new Date(ts * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" });
+}
+
+function TrainedModelsBar({
+  models,
+  loading,
+  onRefresh,
+  onOpen,
+  onTrainLoop,
+}: {
+  models: StoredModelInfo[];
+  loading: boolean;
+  onRefresh: () => void;
+  onOpen: (symbol: string) => void;
+  onTrainLoop: () => void;
+}) {
+  return (
+    <div className="mb-4 rounded-lg border border-gray-800 bg-gray-900/40 px-4 py-2.5 flex items-center gap-3 flex-wrap">
+      <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide shrink-0">Trained models</span>
+      {loading ? (
+        <span className="text-xs text-gray-600">Loading…</span>
+      ) : models.length === 0 ? (
+        <span className="text-xs text-gray-600 italic">
+          None yet —{" "}
+          <button onClick={onTrainLoop} className="text-indigo-400 hover:text-indigo-300 underline">
+            run Train Loop first
+          </button>
+        </span>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {models.map(m => (
+            <button
+              key={m.model_id}
+              onClick={() => onOpen(m.symbol)}
+              title={`Click to analyse · OOS: ${
+                m.oos_accuracy != null ? (m.oos_accuracy * 100).toFixed(1) + "%" : "—"
+              } · Trained: ${fmtModelDate(m.trained_at)} · ${m.bar_count} bars`}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-900/30 border border-indigo-500/30 text-indigo-300 text-xs font-mono hover:bg-indigo-800/40 hover:border-indigo-400/60 transition-colors"
+            >
+              {m.symbol}
+              {m.oos_accuracy != null && (
+                <span className="text-[10px] text-indigo-400/70">{(m.oos_accuracy * 100).toFixed(0)}%</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      <button
+        onClick={onRefresh}
+        disabled={loading}
+        className="ml-auto shrink-0 flex items-center gap-1 text-[10px] text-gray-600 hover:text-gray-400 transition-colors disabled:opacity-50"
+        title="Refresh model list"
+      >
+        <RefreshCw className={clsx("w-3 h-3", loading && "animate-spin")} />
+        refresh
+      </button>
+    </div>
+  );
+}
+
 function GettingStartedBanner({ onNavigate }: { onNavigate: (id: TabId) => void }) {
   const [dismissed, setDismissed] = useState(false);
   if (dismissed) return null;
@@ -118,6 +182,28 @@ function GettingStartedBanner({ onNavigate }: { onNavigate: (id: TabId) => void 
 
 export default function Home() {
   const [active, setActive] = useState<TabId>("trainloop");
+  const [models, setModels] = useState<StoredModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [advisorSymbol, setAdvisorSymbol] = useState<string | undefined>(undefined);
+
+  const loadModels = useCallback(async () => {
+    setModelsLoading(true);
+    try {
+      const r = await listModels();
+      setModels(r.models);
+    } catch { /* silent */ }
+    finally { setModelsLoading(false); }
+  }, []);
+
+  useEffect(() => { loadModels(); }, [loadModels]);
+
+  // Refresh model list whenever the user switches tabs (picks up newly-trained models)
+  useEffect(() => { loadModels(); }, [active, loadModels]);
+
+  const openAdvisor = useCallback((symbol: string) => {
+    setAdvisorSymbol(symbol);
+    setActive("advisor");
+  }, []);
 
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100">
@@ -155,6 +241,15 @@ export default function Home() {
 
       {/* Content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+        {/* Trained models bar — persistent across all tabs */}
+        <TrainedModelsBar
+          models={models}
+          loading={modelsLoading}
+          onRefresh={loadModels}
+          onOpen={openAdvisor}
+          onTrainLoop={() => setActive("trainloop")}
+        />
+
         {/* Getting started banner — shown on every tab until dismissed */}
         <GettingStartedBanner onNavigate={setActive} />
 
@@ -177,7 +272,7 @@ export default function Home() {
         {active === "trainloop" && <TrainLoopPanel />}
         {active === "screener"  && <ScreenerPanel />}
         {active === "workflow"  && <WorkflowPanel />}
-        {active === "advisor"   && <AdvisorPanel />}
+        {active === "advisor"   && <AdvisorPanel initialSymbol={advisorSymbol} />}
         {active === "backtest"  && <BacktestPanel />}
       </div>
     </main>

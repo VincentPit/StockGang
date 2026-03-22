@@ -8,6 +8,7 @@ interface ModelExplainerCardProps {
   model: StoredModelInfo;
   features?: Array<{ feature: string; importance: number }>;
   onDelete?: (symbol: string) => void;
+  onAnalyse?: (symbol: string) => void;
 }
 
 function fmt(n?: number, d = 3) { return n == null ? "—" : n.toFixed(d); }
@@ -16,7 +17,7 @@ function fmtDate(ts?: number) {
   return new Date(ts * 1000).toLocaleDateString("en-US", { year: "2-digit", month: "short", day: "numeric" });
 }
 
-export function ModelExplainerCard({ model, features, onDelete }: ModelExplainerCardProps) {
+export function ModelExplainerCard({ model, features, onDelete, onAnalyse }: ModelExplainerCardProps) {
   const sortedFeats = features
     ? [...features].sort((a, b) => b.importance - a.importance).slice(0, 10)
     : [];
@@ -29,15 +30,26 @@ export function ModelExplainerCard({ model, features, onDelete }: ModelExplainer
           <div className="text-sm font-semibold text-gray-100 font-mono">{model.symbol}</div>
           <div className="text-[10px] text-gray-500 mt-0.5">{model.strategy_id} · {model.model_id}</div>
         </div>
-        {onDelete && (
-          <button
-            onClick={() => onDelete(model.symbol)}
-            className="p-1 rounded text-gray-600 hover:text-red-400 transition-colors"
-            title="Delete model"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        )}
+        <div className="flex items-center gap-1">
+          {onAnalyse && (
+            <button
+              onClick={() => onAnalyse(model.symbol)}
+              className="px-2 py-0.5 rounded text-[11px] text-indigo-400 hover:bg-indigo-900/40 transition-colors font-medium"
+              title="Analyse this symbol"
+            >
+              Analyse →
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={() => onDelete(model.symbol)}
+              className="p-1 rounded text-gray-600 hover:text-red-400 transition-colors"
+              title="Delete model"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-2 text-[10px]">
