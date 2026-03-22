@@ -520,3 +520,58 @@ class TrainLoopResponse(BaseModel):
     symbols_tested: list[str]      = []
     all_trials:    list[TrainTrialRow] = []
     error:         Optional[str]   = None
+
+
+# ── Auto-Tune ────────────────────────────────────────────────────────────────
+class AutoTuneRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    symbols:        Optional[list[str]] = None
+    top_n:          int = Field(default=3, ge=1, le=10)
+    max_iterations: int = Field(default=3, ge=1, le=5)
+
+
+class AutoTuneIterAnalysis(BaseModel):
+    symbol:       str
+    signal:       Optional[str]   = None
+    confidence:   Optional[float] = None
+    p_buy:        Optional[float] = None
+    p_hold:       Optional[float] = None
+    p_sell:       Optional[float] = None
+    oos_accuracy: Optional[float] = None
+    error:        Optional[str]   = None
+
+
+class AutoTuneAdjustment(BaseModel):
+    type:   str
+    param:  str
+    old:    Any
+    new:    Any
+    reason: str
+
+
+class AutoTuneIteration(BaseModel):
+    iteration:   int
+    started_at:  Optional[str]   = None
+    phase:       Optional[str]   = None
+    score:       float           = 0.0
+    backtest_ok: bool            = False
+    model_ok:    bool            = False
+    backtest:    dict            = {}
+    analyses:    list[AutoTuneIterAnalysis] = []
+    failures:    list[str]       = []
+    adjustments: list[AutoTuneAdjustment]  = []
+    breakdown:   dict            = {}
+
+
+class AutoTuneResponse(BaseModel):
+    job_id:         str
+    status:         str
+    pct:            Optional[int]   = None
+    step:           Optional[str]   = None
+    converged:      bool            = False
+    iterations_run: int             = 0
+    final_score:    float           = 0.0
+    best_symbol:    Optional[str]   = None
+    best_config:    Optional[str]   = None
+    iterations:     list[AutoTuneIteration] = []
+    error:          Optional[str]   = None

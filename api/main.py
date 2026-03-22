@@ -69,6 +69,7 @@ from api.runner import (  # noqa: E402
     get_price_sync,
     get_regime_sync,
     launch_analyze,
+    launch_auto_tune,
     launch_backtest,
     launch_recommend,
     launch_screener,
@@ -83,6 +84,8 @@ from api.schemas import (  # noqa: E402
     AccountPosition,
     AnalysisResponse,
     AnalyzeRequest,
+    AutoTuneRequest,
+    AutoTuneResponse,
     BacktestRequest,
     BacktestResponse,
     FundamentalsResponse,
@@ -150,6 +153,7 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
         "/api/advisor/train",
         "/api/advisor/analyze",
         "/api/train-loop",
+        "/api/auto-tune",
     })
 
     def __init__(self, app) -> None:
@@ -442,6 +446,84 @@ async def get_train_loop(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return _train_loop_response(job)
+
+
+# ── Auto-Tune (train → analyse → diagnose → adjust → retrain) ────────────────
+
+@app.post("/api/auto-tune", response_model=AutoTuneResponse, status_code=202)
+async def start_auto_tune(req: AutoTuneRequest):
+    """
+    Launch the autonomous train → analyse → diagnose → adjust → retrain loop.
+    Runs up to max_iterations. Writes best_params.json + model_overrides.json.
+    Poll GET /api/auto-tune/{job_id} for live progress.
+    """
+    jid = new_job("auto_tune")
+    await launch_auto_tune(jid, req.model_dump())
+    return AutoTuneResponse(job_id=jid, status="pending")
+
+
+@app.get("/api/auto-tune/{job_id}", response_model=AutoTuneResponse)
+async def get_auto_tune(job_id: str):
+    """Poll an auto-tune job by ID."""
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _auto_tune_response(job)
+
+
+def _auto_tune_response(job: dict) -> AutoTuneResponse:
+    from api.schemas import AutoTuneIteration, AutoTuneIterAnalysis, AutoTuneAdjustment
+    iterations = []
+    for it in job.get("iterations", []):
+        analyses = [
+            AutoTuneIterAnalysis(
+                symbol       = a.get("symbol", ""),
+                signal       = a.get("signal"),
+                confidence   = a.get("confidence"),
+                p_buy        = a.get("p_buy"),
+                p_hold       = a.get("p_hold"),
+                p_sell       = a.get("p_sell"),
+                oos_accuracy = a.get("oos_accuracy"),
+                error        = a.get("error"),
+            )
+            for a in it.get("analyses", [])
+        ]
+        adjustments = [
+            AutoTuneAdjustment(
+                type   = adj.get("type", ""),
+                param  = adj.get("param", ""),
+                old    = adj.get("old"),
+                new    = adj.get("new"),
+                reason = adj.get("reason", ""),
+            )
+            for adj in it.get("adjustments", [])
+        ]
+        iterations.append(AutoTuneIteration(
+            iteration   = it.get("iteration", 0),
+            started_at  = it.get("started_at"),
+            phase       = it.get("phase"),
+            score       = float(it.get("score", 0)),
+            backtest_ok = bool(it.get("backtest_ok")),
+            model_ok    = bool(it.get("model_ok")),
+            backtest    = it.get("backtest", {}),
+            analyses    = analyses,
+            failures    = it.get("failures", []),
+            adjustments = adjustments,
+            breakdown   = it.get("breakdown", {}),
+        ))
+    return AutoTuneResponse(
+        job_id         = job["id"],
+        status         = job["status"],
+        pct            = job.get("pct"),
+        step           = job.get("step"),
+        converged      = bool(job.get("converged")),
+        iterations_run = int(job.get("iterations_run", 0)),
+        final_score    = float(job.get("final_score", 0)),
+        best_symbol    = job.get("best_symbol"),
+        best_config    = job.get("best_config"),
+        iterations     = iterations,
+        error          = job.get("error"),
+    )
 
 
 def _train_loop_response(job: dict) -> TrainLoopResponse:

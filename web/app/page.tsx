@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
 import clsx from "clsx";
-import { BarChart2, Search, GitMerge, Brain, Repeat2, ChevronRight, X, RefreshCw } from "lucide-react";
+import { BarChart2, Search, GitMerge, Brain, Repeat2, ChevronRight, X, RefreshCw, Sparkles } from "lucide-react";
 import { listModels } from "@/lib/api";
 import type { StoredModelInfo } from "@/lib/api";
 
@@ -13,14 +13,23 @@ const ScreenerPanel   = dynamic(() => import("@/components/ScreenerPanel"),   { 
 const WorkflowPanel   = dynamic(() => import("@/components/WorkflowPanel"),   { ssr: false });
 const AdvisorPanel    = dynamic(() => import("@/components/AdvisorPanel"),    { ssr: false });
 const TrainLoopPanel  = dynamic(() => import("@/components/TrainLoopPanel"),  { ssr: false });
+const AutoTunePanel   = dynamic(() => import("@/components/AutoTunePanel"),   { ssr: false });
 
 const TABS = [
+  {
+    id: "autotune",
+    step: 0,
+    label: "Auto-Tune",
+    Icon: Sparkles,
+    tagline: "Fully automated",
+    desc: "One click: screens stocks, trains models, reads its own quality metrics, diagnoses failures, adjusts LGB hyper-params + signal thresholds, and retrains — up to 5 iterations until score ≥ 70 / 100.",
+  },
   {
     id: "trainloop",
     step: 1,
     label: "Train Loop",
     Icon: Repeat2,
-    tagline: "Start here",
+    tagline: "Manual training",
     desc: "Screens the market, trains an LGBM model on the best stocks, and auto-tunes strategy parameters. Run this first — everything else uses what it finds.",
   },
   {
@@ -60,9 +69,9 @@ const TABS = [
 type TabId = typeof TABS[number]["id"];
 
 const FLOW_STEPS = [
-  { step: 1, tab: "trainloop" as TabId, label: "Train Loop",  note: "trains models + saves best params" },
-  { step: 2, tab: "advisor"   as TabId, label: "Advisor",     note: "get today's BUY signals"           },
-  { step: 3, tab: "workflow"  as TabId, label: "Workflow",    note: "screen + backtest in one click"    },
+  { step: 0, tab: "autotune"  as TabId, label: "Auto-Tune",  note: "train + self-improve automatically" },
+  { step: 2, tab: "advisor"   as TabId, label: "Advisor",     note: "get today's BUY signals"            },
+  { step: 4, tab: "workflow"  as TabId, label: "Workflow",    note: "screen + backtest in one click"     },
 ];
 
 function fmtModelDate(ts?: number) {
@@ -219,15 +228,22 @@ export default function Home() {
                 title={tagline}
                 className={clsx(
                   "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-colors relative",
-                  active === id
-                    ? "bg-indigo-600/20 text-indigo-400"
-                    : "text-gray-500 hover:text-gray-300 hover:bg-gray-800/50",
+                  id === "autotune"
+                    ? active === id
+                      ? "bg-violet-600/20 text-violet-400"
+                      : "text-violet-500/70 hover:text-violet-300 hover:bg-violet-900/20"
+                    : active === id
+                      ? "bg-indigo-600/20 text-indigo-400"
+                      : "text-gray-500 hover:text-gray-300 hover:bg-gray-800/50",
                 )}
               >
                 {/* Step number badge */}
                 <span className={clsx(
                   "w-4 h-4 rounded-full text-[9px] font-bold flex items-center justify-center shrink-0",
-                  active === id ? "bg-indigo-500 text-white" : "bg-gray-700 text-gray-400",
+                  id === "autotune" && active === id ? "bg-violet-500 text-white" :
+                  id === "autotune"                  ? "bg-violet-900/60 text-violet-400" :
+                  active === id                      ? "bg-indigo-500 text-white" :
+                                                       "bg-gray-700 text-gray-400",
                 )}>
                   {step}
                 </span>
@@ -257,18 +273,30 @@ export default function Home() {
         {(() => {
           const tab = TABS.find(t => t.id === active)!;
           return (
-            <div className="flex items-start gap-3 mb-5 p-3 rounded-lg bg-gray-900/40 border border-gray-800">
-              <tab.Icon className="w-4 h-4 text-indigo-400 mt-0.5 shrink-0" />
+            <div className={clsx(
+              "flex items-start gap-3 mb-5 p-3 rounded-lg border",
+              tab.id === "autotune"
+                ? "bg-violet-950/20 border-violet-800/40"
+                : "bg-gray-900/40 border-gray-800"
+            )}>
+              <tab.Icon className={clsx(
+                "w-4 h-4 mt-0.5 shrink-0",
+                tab.id === "autotune" ? "text-violet-400" : "text-indigo-400"
+              )} />
               <div>
                 <span className="text-xs font-semibold text-gray-200">{tab.label}</span>
                 <span className="mx-2 text-gray-600">·</span>
-                <span className="text-xs text-indigo-400/80 font-medium">{tab.tagline}</span>
+                <span className={clsx(
+                  "text-xs font-medium",
+                  tab.id === "autotune" ? "text-violet-400/90" : "text-indigo-400/80"
+                )}>{tab.tagline}</span>
                 <p className="text-xs text-gray-500 mt-0.5">{tab.desc}</p>
               </div>
             </div>
           );
         })()}
 
+        {active === "autotune"  && <AutoTunePanel />}
         {active === "trainloop" && <TrainLoopPanel />}
         {active === "screener"  && <ScreenerPanel />}
         {active === "workflow"  && <WorkflowPanel />}
