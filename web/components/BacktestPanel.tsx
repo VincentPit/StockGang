@@ -24,7 +24,7 @@ export default function BacktestPanel() {
   const [lookback, setLookback] = useState(365);
   const [cash, setCash] = useState(1_000_000);
   const [commission, setCommission] = useState(0.001);
-  const [stopLoss, setStopLoss] = useState(0.08);
+  const [stopLoss, setStopLoss] = useState(8); // user enters %, e.g. 8 = 8%
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +43,7 @@ export default function BacktestPanel() {
         lookback_days: lookback,
         initial_cash: cash,
         commission_rate: commission,
-        stop_loss_pct: stopLoss,
+        stop_loss_pct: -(stopLoss / 100), // API requires ≤ 0
       };
       const init = await startBacktest(req);
       const final = await pollJob(
@@ -94,8 +94,8 @@ export default function BacktestPanel() {
             value={commission} onChange={e => setCommission(Number(e.target.value))} />
         </div>
         <div>
-          <label className="block text-xs text-gray-400 mb-1">Stop Loss %</label>
-          <input type="number" step="0.01" className="w-full rounded bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-indigo-500"
+          <label className="block text-xs text-gray-400 mb-1">Stop Loss <span className="text-gray-500">(%, e.g. 8 = 8%)</span></label>
+          <input type="number" step="1" min="0" max="50" className="w-full rounded bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-indigo-500"
             value={stopLoss} onChange={e => setStopLoss(Number(e.target.value))} />
         </div>
       </div>

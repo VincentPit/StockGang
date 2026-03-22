@@ -39,13 +39,13 @@ function ScreenBadges({ rows }: { rows: ScreenRow[] }) {
 }
 
 export default function WorkflowPanel() {
-  const [topN, setTopN] = useState(10);
+  const [topN, setTopN] = useState(6);
   const [minBars, setMinBars] = useState(60);
   const [lookbackYears, setLookbackYears] = useState(2);
   const [backtestDays, setBacktestDays] = useState(365);
   const [cash, setCash] = useState(1_000_000);
   const [commission, setCommission] = useState(0.001);
-  const [stopLoss, setStopLoss] = useState(0.08);
+  const [stopLoss, setStopLoss] = useState(8); // user enters %, e.g. 8 = 8%
   const [indices, setIndices] = useState("000300");
 
   const [result, setResult] = useState<WorkflowResult | null>(null);
@@ -68,7 +68,7 @@ export default function WorkflowPanel() {
         backtest_days: backtestDays,
         initial_cash: cash,
         commission_rate: commission,
-        stop_loss_pct: stopLoss,
+        stop_loss_pct: -(stopLoss / 100), // API requires ≤ 0
         indices: indices.split(",").map(s => s.trim()).filter(Boolean),
       };
       const init = await startWorkflow(req);
@@ -89,10 +89,15 @@ export default function WorkflowPanel() {
 
   return (
     <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5 space-y-5">
-      <div className="flex items-center gap-2">
-        <GitMerge className="w-5 h-5 text-indigo-400" />
-        <h2 className="text-lg font-semibold text-gray-100">Workflow</h2>
-        <span className="text-xs text-gray-500">Screen → Backtest pipeline</span>
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <GitMerge className="w-5 h-5 text-indigo-400" />
+          <h2 className="text-lg font-semibold text-gray-100">Workflow</h2>
+          <span className="text-xs text-gray-500">Screen → Backtest pipeline</span>
+        </div>
+        <p className="text-xs text-emerald-400/80">
+          ✓ Automatically uses your trained model from <span className="font-mono">best_params.json</span> — run Train Loop (step 1) first.
+        </p>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -132,8 +137,8 @@ export default function WorkflowPanel() {
             value={commission} onChange={e => setCommission(Number(e.target.value))} />
         </div>
         <div>
-          <label className="block text-xs text-gray-400 mb-1">Stop Loss %</label>
-          <input type="number" step="0.01" className="w-full rounded bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-indigo-500"
+          <label className="block text-xs text-gray-400 mb-1">Stop Loss <span className="text-gray-500">(%, e.g. 8 = 8%)</span></label>
+          <input type="number" step="1" min="0" max="50" className="w-full rounded bg-gray-800 border border-gray-700 px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-indigo-500"
             value={stopLoss} onChange={e => setStopLoss(Number(e.target.value))} />
         </div>
       </div>
