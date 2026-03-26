@@ -4,20 +4,20 @@
   "min_hold_bars": 5,
   "forward_days": 5,
   "stop_loss_pct": -0.08,
-  "trailing_stop_pct": 0.0,
+  "trailing_stop_pct": 0.06,
   "take_profit_pct": 0.0,
   "commission_rate": 0.0003,
-  "_source_symbol": "sz002648",
-  "_saved_at": "2026-03-20T23:17:10.150483",
+  "_source_symbol": "sz300866",
+  "_saved_at": "2026-03-23T11:42:19.695083",
   "_result": {
-    "total_pnl": 11801.17,
-    "total_pnl_pct": 0.011801,
-    "sharpe_ratio": 0.23,
-    "max_drawdown": -0.0724,
-    "num_trades": 5,
-    "win_rate": 0.5,
-    "avg_win": 17015.89,
-    "avg_loss": -5214.72,
-    "profit_factor": 3.263
+    "total_pnl": -10576.08,
+    "total_pnl_pct": -0.010576,
+    "sharpe_ratio": -0.1072,
+    "max_drawdown": -0.0599,
+    "num_trades": 6,
+    "win_rate": 0.0,
+    "avg_win": 0.0,
+    "avg_loss": -5288.04,
+    "profit_factor": 0.0
   }
 }

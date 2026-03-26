@@ -40,6 +40,20 @@ _MAX_JOBS: int = 500
 _db.init_db()
 _jobs.update({j["id"]: j for j in _db.fetch_all_jobs()})
 
+# Mark orphaned "running"/"pending" jobs from a previous server session.
+# The threads that were executing them are gone — they'll never finish.
+for _j in list(_jobs.values()):
+    if _j.get("status") in ("running", "pending"):
+        _log.warning(
+            "Marking orphaned job %s (%s) as error — server was restarted while it was %s",
+            _j["id"][:8], _j.get("kind", "?"), _j["status"],
+        )
+        _j.update({
+            "status": "error",
+            "error":  f"Job interrupted by server restart (was {_j['status']} at pct={_j.get('pct', '?')})",
+        })
+        _db.upsert_job(_j)
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 def _evict_stale_jobs() -> None:
@@ -55,6 +69,7 @@ def _evict_stale_jobs() -> None:
         _jobs.pop(j["id"], None)
 def _update_job(jid: str, updates: dict) -> None:
     """Mutate in-memory dict and write-through to SQLite atomically."""
+    updates["_updated_at"] = time.time()      # heartbeat — lets clients detect stale jobs
     _jobs[jid].update(updates)
     _db.upsert_job(_jobs[jid])
     if "status" in updates:
@@ -685,6 +700,55 @@ def _run_train_loop_sync(jid: str, req: dict) -> None:
 
 async def launch_train_loop(jid: str, req: dict) -> None:
     asyncio.get_running_loop().run_in_executor(_executor, _run_train_loop_sync, jid, req)
+
+
+# ── auto-tune (train → analyse → diagnose → adjust → retrain) ───────────────
+
+def _run_auto_tune_sync(jid: str, req: dict) -> None:
+    """Run the autonomous train → analyse → adjust loop in a background thread."""
+    try:
+        _update_job(jid, {"status": "running", "pct": 1, "step": "Starting auto-tune loop…"})
+
+        from api.auto_tune import auto_tune_loop
+
+        def _cb(d: dict) -> None:
+            upd: dict = {"status": "running"}
+            if "pct"  in d: upd["pct"]  = d["pct"]
+            if "step" in d: upd["step"] = d["step"]
+            _update_job(jid, upd)
+
+        result = auto_tune_loop(
+            symbols        = req.get("symbols"),
+            top_n          = req.get("top_n", 3),
+            max_iterations = req.get("max_iterations", 3),
+            progress_cb    = _cb,
+        )
+
+        _update_job(jid, {
+            "status":         "done",
+            "pct":            100,
+            "step":           (
+                f"Converged ✅ in {result['iterations_run']} iteration(s)"
+                if result["converged"]
+                else f"Max iterations reached — best params applied ({result['iterations_run']} iter)"
+            ),
+            "converged":       result["converged"],
+            "iterations_run":  result["iterations_run"],
+            "final_score":     result["final_score"],
+            "best_symbol":     result.get("best_symbol"),
+            "best_config":     result.get("best_config"),
+            "iterations":      result.get("iterations", []),
+        })
+
+    except Exception:
+        import traceback as _tb
+        tb = _tb.format_exc()
+        _log.error("auto_tune job %s failed: %s", jid[:8], tb.splitlines()[-1])
+        _update_job(jid, {"status": "error", "error": tb})
+
+
+async def launch_auto_tune(jid: str, req: dict) -> None:
+    asyncio.get_running_loop().run_in_executor(_executor, _run_auto_tune_sync, jid, req)
 
 
 # ── advisor: train ────────────────────────────────────────────────────────────

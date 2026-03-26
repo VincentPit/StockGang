@@ -27,8 +27,10 @@ import argparse
 import asyncio
 import json
 import logging
+import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -134,7 +136,17 @@ def _score(r: dict) -> float:
 
 
 # ── One backtest trial ────────────────────────────────────────────────────────
-def run_backtest(symbol: str, p: Params, lookback_days: int, train_years: int) -> dict:
+# Per-backtest timeout in seconds.  A single symbol+config should never take
+# more than 5 minutes even on slow hardware.  Without this, a hung AKShare /
+# yfinance network call blocks the entire auto-tune thread forever.
+_BACKTEST_TIMEOUT: int = 300   # 5 minutes
+
+# Dedicated single-thread pool for timeout-wrapped backtests so we can
+# interrupt a hung asyncio.run() without killing the caller thread.
+_bt_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bt_worker")
+
+
+def _run_backtest_inner(symbol: str, p: Params, lookback_days: int, train_years: int) -> dict:
     """
     Run a full single-symbol backtest with the given Params.
     Returns a flat dict of metrics.
@@ -194,6 +206,26 @@ def run_backtest(symbol: str, p: Params, lookback_days: int, train_years: int) -
         "avg_loss":      round(result.avg_loss, 2),
         "profit_factor": round(result.profit_factor, 4),
     }
+
+
+def run_backtest(symbol: str, p: Params, lookback_days: int, train_years: int) -> dict:
+    """
+    Timeout-wrapped entry point for a single backtest.
+
+    Submits the real work to a dedicated thread so we can enforce a hard
+    ``_BACKTEST_TIMEOUT`` second deadline.  If AKShare / yfinance hangs on a
+    network call, we raise instead of blocking the entire auto-tune loop
+    forever.
+    """
+    fut = _bt_pool.submit(_run_backtest_inner, symbol, p, lookback_days, train_years)
+    try:
+        return fut.result(timeout=_BACKTEST_TIMEOUT)
+    except FuturesTimeout:
+        fut.cancel()
+        raise TimeoutError(
+            f"Backtest for {symbol} timed out after {_BACKTEST_TIMEOUT}s "
+            f"— likely a hung network call (AKShare / yfinance)"
+        )
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────

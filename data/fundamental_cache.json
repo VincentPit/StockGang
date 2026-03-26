@@ -163,5 +163,60 @@
     "revenue_growth": 0.0,
     "net_margin": 10.0,
     "dividend_yield": 0.0
+  },
+  "sh601877": {
+    "symbol": "sh601877",
+    "ts": "2026-03-21T23:35:59.731722",
+    "pe_ttm": 20.0,
+    "pb": 2.0,
+    "ps_ttm": 3.0,
+    "roe": 9.67,
+    "revenue_growth": 0.0,
+    "net_margin": 3.8574,
+    "dividend_yield": 0.0
+  },
+  "sh600519": {
+    "symbol": "sh600519",
+    "ts": "2026-03-21T23:55:51.901533",
+    "pe_ttm": 20.0,
+    "pb": 2.0,
+    "ps_ttm": 3.0,
+    "roe": 24.64,
+    "revenue_growth": 0.0,
+    "net_margin": 22.1636,
+    "dividend_yield": 0.0
+  },
+  "sz002463": {
+    "symbol": "sz002463",
+    "ts": "2026-03-23T10:43:49.627928",
+    "pe_ttm": 20.0,
+    "pb": 2.0,
+    "ps_ttm": 3.0,
+    "roe": 21.07,
+    "revenue_growth": 0.0,
+    "net_margin": 11.4258,
+    "dividend_yield": 0.0
+  },
+  "sz000617": {
+    "symbol": "sz000617",
+    "ts": "2026-03-23T10:44:00.680421",
+    "pe_ttm": 20.0,
+    "pb": 2.0,
+    "ps_ttm": 3.0,
+    "roe": 3.87,
+    "revenue_growth": 0.0,
+    "net_margin": 0.7365,
+    "dividend_yield": 0.0
+  },
+  "sz300866": {
+    "symbol": "sz300866",
+    "ts": "2026-03-23T10:43:57.922547",
+    "pe_ttm": 20.0,
+    "pb": 2.0,
+    "ps_ttm": 3.0,
+    "roe": 20.27,
+    "revenue_growth": 0.0,
+    "net_margin": 10.7529,
+    "dividend_yield": 0.0
   }
 }

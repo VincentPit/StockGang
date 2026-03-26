@@ -228,6 +228,21 @@ export async function getScreen(jobId: string): Promise<ScreenResult> {
  * onUpdate is called on every tick with the full response object so callers
  * can read live pct/step fields without replacing onProgress.
  */
+
+// ── Job listing (used to find active jobs for resume) ─────────────────────────
+
+export interface JobSummary {
+  id: string;
+  kind: string;
+  status: JobStatus | string;
+  created_at?: string;
+}
+
+export async function listJobs(): Promise<JobSummary[]> {
+  const res = await apiFetch(`${BASE}/jobs`);
+  return res.json();
+}
+
 export async function pollJob<T extends { status: JobStatus | string; error?: string }>(
   jobId: string,
   fetcher: (id: string) => Promise<T>,
@@ -677,5 +692,95 @@ export async function startTrainLoop(req: TrainLoopRequest): Promise<TrainLoopRe
 
 export async function getTrainLoop(jobId: string): Promise<TrainLoopResult> {
   const res = await apiFetch(`${BASE}/train-loop/${jobId}`);
+  return res.json();
+}
+
+// ── Auto-Tune ──────────────────────────────────────────────────────────────
+
+export interface AutoTuneRequest {
+  symbols?: string[];
+  top_n?: number;
+  max_iterations?: number;
+}
+
+export interface AutoTuneIterAnalysis {
+  symbol: string;
+  signal?: string;
+  confidence?: number;
+  p_buy?: number;
+  p_hold?: number;
+  p_sell?: number;
+  oos_accuracy?: number;
+  error?: string;
+}
+
+export interface AutoTuneAdjustment {
+  type: string;     // "model_hyperparams" | "signal_params" | "screener_weights"
+  param: string;
+  old: unknown;
+  new: unknown;
+  reason: string;
+}
+
+export interface AutoTuneIteration {
+  iteration: number;
+  started_at?: string;
+  phase?: string;
+  score: number;
+  backtest_ok: boolean;
+  model_ok: boolean;
+  backtest: {
+    symbol?: string;
+    config?: string;
+    passes?: boolean;
+    score?: number;
+    profit_factor?: number;
+    sharpe?: number;
+    win_rate?: number;
+    num_trades?: number;
+    total_pnl?: number;
+  };
+  analyses: AutoTuneIterAnalysis[];
+  failures: string[];
+  adjustments: AutoTuneAdjustment[];
+  breakdown: {
+    total?: number;
+    backtest?: number;
+    model?: number;
+    backtest_ok?: boolean;
+    model_ok?: boolean;
+    pf?: number;
+    sharpe?: number;
+    win_rate?: number;
+    trades?: number;
+    pnl?: number;
+  };
+}
+
+export interface AutoTuneResult {
+  job_id: string;
+  status: string;
+  pct?: number;
+  step?: string;
+  converged: boolean;
+  iterations_run: number;
+  final_score: number;
+  best_symbol?: string;
+  best_config?: string;
+  iterations: AutoTuneIteration[];
+  error?: string;
+}
+
+export async function startAutoTune(req: AutoTuneRequest): Promise<AutoTuneResult> {
+  const res = await apiFetch(`${BASE}/auto-tune`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }, 30_000);
+  return res.json();
+}
+
+export async function getAutoTune(jobId: string): Promise<AutoTuneResult> {
+  const res = await apiFetch(`${BASE}/auto-tune/${jobId}`);
   return res.json();
 }

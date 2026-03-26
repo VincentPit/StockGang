@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+import json
 import sys
 import time
 from datetime import datetime
@@ -69,6 +70,26 @@ _LGB_PARAMS = dict(
     verbose           = -1,
     class_weight      = "balanced",
 )
+
+_OVERRIDES_PATH = Path(__file__).parent.parent / "model_overrides.json"
+
+def _effective_lgb_params() -> dict:
+    """
+    Return _LGB_PARAMS merged with any overrides written by auto_tune.py.
+    Only recognised LightGBM param keys are merged to prevent injection.
+    """
+    if not _OVERRIDES_PATH.exists():
+        return dict(_LGB_PARAMS)
+    try:
+        overrides = json.loads(_OVERRIDES_PATH.read_text())
+    except Exception:
+        return dict(_LGB_PARAMS)
+    allowed = set(_LGB_PARAMS.keys())
+    merged  = dict(_LGB_PARAMS)
+    merged.update({k: v for k, v in overrides.items() if k in allowed})
+    _log.info("_effective_lgb_params: applied overrides %s",
+              {k: v for k, v in overrides.items() if k in allowed})
+    return merged
 
 # ── Sector map ────────────────────────────────────────────────────────────────
 # Universe restricted to Shanghai (sh) and Shenzhen (sz) A-share markets only.
@@ -313,7 +334,14 @@ def _train_lgbm(
     if feat_df.empty:
         raise ValueError(f"Feature engineering produced empty DataFrame for {symbol}")
 
-    labels  = make_labels(feat_df, forward_days=FORWARD_DAYS, threshold=THRESHOLD)
+    # Read overrides written by auto_tune.py (e.g. adjusted num_leaves, forward_days)
+    params  = _effective_lgb_params()
+    ov_path = Path(__file__).parent.parent / "model_overrides.json"
+    ov      = json.loads(ov_path.read_text()) if ov_path.exists() else {}
+    eff_forward_days = int(ov.get("forward_days", FORWARD_DAYS))
+    eff_threshold    = float(ov.get("threshold",    THRESHOLD))
+
+    labels  = make_labels(feat_df, forward_days=eff_forward_days, threshold=eff_threshold)
     aligned = feat_df.join(labels.rename("label")).dropna()
 
     if len(aligned) < 60:
@@ -330,7 +358,7 @@ def _train_lgbm(
     for frac in [1.0, 0.75, 0.50]:
         n_win     = max(60, int(n * frac))
         win_slice = aligned.iloc[-n_win:]
-        sub       = _train_single_window(feat_cols, win_slice, _LGB_PARAMS, TRAIN_RATIO)
+        sub       = _train_single_window(feat_cols, win_slice, params, TRAIN_RATIO)
         if sub is not None:
             sub_models.append(sub)
 

@@ -1,12 +1,12 @@
 {
-  "W_TREND": 0.2,
-  "W_ATR": 0.1,
-  "W_AUTOCORR": 0.1,
-  "W_MOM6M": 0.05,
-  "W_DD": 0.14,
-  "W_LOW_VOL": 0.13,
-  "W_DIST_52W": 0.05,
-  "W_YANG": 0.05,
-  "W_SHARPE": 0.1,
-  "W_CALMAR": 0.08
+  "W_TREND": 0.027,
+  "W_ATR": 0.013,
+  "W_AUTOCORR": 0.019,
+  "W_MOM6M": 0.019,
+  "W_DD": 0.422,
+  "W_LOW_VOL": 0.331,
+  "W_DIST_52W": 0.009,
+  "W_YANG": 0.009,
+  "W_SHARPE": 0.091,
+  "W_CALMAR": 0.06
 }

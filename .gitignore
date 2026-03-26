@@ -15,3 +15,4 @@ backtest_trades.csv
 data/*.db
 .next/
 node_modules/
+data/
