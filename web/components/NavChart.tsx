@@ -13,7 +13,7 @@ interface NavChartProps {
 
 export function NavChart({ data, height = 240 }: NavChartProps) {
   const formatted = useMemo(() =>
-    data.map(d => ({ ...d, nav: Number(d.nav.toFixed(2)) })),
+    data.map(d => ({ ...d, nav: Number((d.nav ?? 0).toFixed(2)) })),
     [data],
   );
 

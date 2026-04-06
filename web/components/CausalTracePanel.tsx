@@ -21,8 +21,8 @@ interface CausalTracePanelProps {
 }
 
 export function CausalTracePanel({ nodes, gates = [], scope }: CausalTracePanelProps) {
-  const sorted = [...nodes].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
-  const maxAbs = Math.max(...sorted.map(n => Math.abs(n.contribution)), 0.001);
+  const sorted = [...nodes].sort((a, b) => Math.abs(b.contribution ?? 0) - Math.abs(a.contribution ?? 0));
+  const maxAbs = Math.max(...sorted.map(n => Math.abs(n.contribution ?? 0)), 0.001);
 
   return (
     <div className="space-y-4">
@@ -39,7 +39,8 @@ export function CausalTracePanel({ nodes, gates = [], scope }: CausalTracePanelP
 
       <div className="space-y-1.5">
         {sorted.map(node => {
-          const pct = (Math.abs(node.contribution) / maxAbs) * 100;
+          const c = node.contribution ?? 0;
+          const pct = (Math.abs(c) / maxAbs) * 100;
           const pos = node.direction === "positive";
           return (
             <div key={node.factor} className="flex items-center gap-3 group">
@@ -50,7 +51,7 @@ export function CausalTracePanel({ nodes, gates = [], scope }: CausalTracePanelP
               <div className={clsx("w-14 text-right text-xs font-mono shrink-0",
                 pos ? "text-emerald-400" : "text-red-400"
               )}>
-                {node.contribution >= 0 ? "+" : ""}{node.contribution.toFixed(3)}
+                {c >= 0 ? "+" : ""}{c.toFixed(3)}
               </div>
               <div className="hidden group-hover:block text-[10px] text-gray-500 truncate max-w-xs">
                 {node.description}
@@ -67,7 +68,7 @@ export function CausalTracePanel({ nodes, gates = [], scope }: CausalTracePanelP
             {gates.map(g => (
               <div
                 key={g.check}
-                title={`${g.label}: actual ${g.actual.toFixed(3)} vs threshold ${g.threshold.toFixed(3)} — ${g.note}`}
+                title={`${g.label}: actual ${(g.actual ?? 0).toFixed(3)} vs threshold ${(g.threshold ?? 0).toFixed(3)} — ${g.note}`}
                 className={clsx(
                   "px-2 py-0.5 rounded-full text-[10px] font-medium border",
                   g.passed

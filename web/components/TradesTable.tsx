@@ -34,8 +34,8 @@ export function TradesTable({ trades, maxRows = 100 }: TradesTableProps) {
                 {t.side}
               </td>
               <td className="py-1 pr-3 text-right text-gray-300">{t.qty}</td>
-              <td className="py-1 pr-3 text-right text-gray-300">¥{t.price.toFixed(2)}</td>
-              <td className="py-1 pr-3 text-right text-gray-500">¥{t.commission.toFixed(2)}</td>
+              <td className="py-1 pr-3 text-right text-gray-300">¥{(t.price ?? 0).toFixed(2)}</td>
+              <td className="py-1 pr-3 text-right text-gray-500">¥{(t.commission ?? 0).toFixed(2)}</td>
               <td className="py-1 text-gray-400 truncate max-w-[100px]">{t.strategy}</td>
             </tr>
           ))}

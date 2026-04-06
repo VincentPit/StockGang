@@ -161,9 +161,9 @@ function SymbolChip({
     <button
       onClick={onToggle}
       title={[
-        `Score: ${row.score.toFixed(2)}`,
-        `Sharpe: ${row.sharpe.toFixed(2)}`,
-        `1Y: ${(row.ret_1y * 100).toFixed(1)}%`,
+        `Score: ${(row.score ?? 0).toFixed(2)}`,
+        `Sharpe: ${(row.sharpe ?? 0).toFixed(2)}`,
+        `1Y: ${((row.ret_1y ?? 0) * 100).toFixed(1)}%`,
         trend ?? "",
       ].filter(Boolean).join(" | ")}
       className={clsx(
@@ -189,9 +189,9 @@ function SymbolChip({
           <span className="font-mono font-semibold text-gray-200">{row.symbol}</span>
           <span className={clsx(
             "text-[10px] font-bold px-1 py-0.5 rounded",
-            row.score >= 0.5 ? "text-emerald-400 bg-emerald-950/50" : "text-amber-400 bg-amber-950/50",
+            (row.score ?? 0) >= 0.5 ? "text-emerald-400 bg-emerald-950/50" : "text-amber-400 bg-amber-950/50",
           )}>
-            {row.score.toFixed(2)}
+            {(row.score ?? 0).toFixed(2)}
           </span>
           {trend && (
             <span className={clsx("text-[9px] px-1 rounded",
@@ -209,11 +209,11 @@ function SymbolChip({
       {/* metrics */}
       <div className="ml-auto text-right shrink-0">
         <div className={clsx("text-[10px] font-medium",
-          row.ret_1y >= 0 ? "text-emerald-400" : "text-red-400",
+          (row.ret_1y ?? 0) >= 0 ? "text-emerald-400" : "text-red-400",
         )}>
-          {(row.ret_1y * 100).toFixed(1)}%
+          {((row.ret_1y ?? 0) * 100).toFixed(1)}%
         </div>
-        <div className="text-[9px] text-gray-600">S:{row.sharpe.toFixed(1)}</div>
+        <div className="text-[9px] text-gray-600">S:{(row.sharpe ?? 0).toFixed(1)}</div>
       </div>
     </button>
   );
