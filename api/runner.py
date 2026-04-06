@@ -374,7 +374,7 @@ def _extract_strategy_attribution(result) -> list[dict]:
         {
             "strategy": c.strategy_id,
             "pnl":      round(c.gross_pnl, 2),
-            "pct":      round(c.pct_of_total, 4),
+            "pct":      round(c.pnl_pct_of_total, 4),
             "trades":   c.num_trades,
             "win_rate": round(c.win_rate, 4),
         }
