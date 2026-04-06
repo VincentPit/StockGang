@@ -1,37 +1,16 @@
-# Python
-.venv/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.egg-info/
-dist/
-build/
-
-# Data & logs (mounted as volumes at runtime)
-data/
-logs/
-*.db
-*.log
+# Dependencies (installed fresh in Docker — never copy local macOS binaries)
+node_modules/
+.next/
 
 # Version control
 .git/
 .gitignore
 
-# Node / Next.js (built separately in web/Dockerfile)
-web/node_modules/
-web/.next/
-
-# Tests
-tests/
-
-# IDE
+# IDE / OS
 .vscode/
 .idea/
 *.swp
-
-# macOS
 .DS_Store
 
-# Env files (injected via docker-compose env_file or secrets)
+# Env files
 .env
