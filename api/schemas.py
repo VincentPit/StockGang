@@ -94,6 +94,27 @@ class BacktestResponse(BaseModel):
     strategy_fills: list[StrategyFills] = []
     error: Optional[str] = None
 
+    # ── Enhanced institutional analytics ──────────────────────
+    sortino: Optional[float] = None
+    calmar: Optional[float] = None
+    omega: Optional[float] = None
+    annualised_return: Optional[float] = None
+    annualised_volatility: Optional[float] = None
+    max_dd_duration_days: Optional[int] = None
+    var_95: Optional[float] = None
+    cvar_95: Optional[float] = None
+    skewness: Optional[float] = None
+    kurtosis: Optional[float] = None
+    ulcer_index: Optional[float] = None
+    gain_to_pain: Optional[float] = None
+    monthly_returns: dict[str, float] = {}       # {"2024-01": 0.032, ...}
+    yearly_returns: dict[str, float] = {}        # {"2024": 0.18, ...}
+    rolling_sharpe_60d: list[dict[str, Any]] = []  # [{date, sharpe}, ...]
+    # Attribution breakdown
+    strategy_attribution: list[dict[str, Any]] = []   # [{strategy, pnl, pct}, ...]
+    top_winners: list[dict[str, Any]] = []             # [{symbol, pnl}, ...]
+    top_losers: list[dict[str, Any]] = []              # [{symbol, pnl}, ...]
+
 
 # ── Screener ─────────────────────────────────────────────────────────────────
 
@@ -575,3 +596,101 @@ class AutoTuneResponse(BaseModel):
     best_config:    Optional[str]   = None
     iterations:     list[AutoTuneIteration] = []
     error:          Optional[str]   = None
+
+
+# ── Walk-Forward Validation ──────────────────────────────────────────────────
+
+class WalkForwardRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    symbols: list[str]
+    lookback_days: int = Field(default=730, ge=90, le=1460, description="Total data window")
+    initial_cash: float = Field(default=1_000_000.0, ge=10_000)
+    commission_rate: float = Field(default=0.0003, ge=0.0, le=0.01)
+    stop_loss_pct: float = Field(default=-0.08, le=0)
+    symbol_loss_cap: float = Field(default=-20_000.0, le=0)
+    train_ratio: float = Field(default=0.70, ge=0.5, le=0.9, description="Train window fraction")
+    n_splits: int = Field(default=5, ge=2, le=10, description="Number of walk-forward splits")
+
+    @field_validator("symbols")
+    @classmethod
+    def symbols_sh_sz_only(cls, v: list[str]) -> list[str]:
+        cleaned = [s.strip().lower() for s in v if s.strip()]
+        if not cleaned:
+            raise ValueError("symbols must contain at least one non-blank entry")
+        bad = [s for s in cleaned if not (s.startswith("sh") or s.startswith("sz"))]
+        if bad:
+            raise ValueError(f"Only SH/SZ symbols supported. Bad: {', '.join(bad)}")
+        return list(dict.fromkeys(cleaned))[:20]
+
+
+class WalkForwardFold(BaseModel):
+    fold: int
+    train_start: str
+    train_end: str
+    test_start: str
+    test_end: str
+    in_sample_sharpe: float
+    out_of_sample_sharpe: float
+    oos_return: float
+    oos_max_dd: float
+    oos_win_rate: float
+
+
+class WalkForwardResponse(BaseModel):
+    job_id: str
+    status: str
+    pct: Optional[int] = None
+    step: Optional[str] = None
+    # Results
+    is_robust: bool = False
+    aggregate_oos_sharpe: Optional[float] = None
+    sharpe_degradation: Optional[float] = None
+    consistency_score: Optional[float] = None
+    stability_score: Optional[float] = None
+    folds: list[WalkForwardFold] = []
+    error: Optional[str] = None
+
+
+# ── Monte Carlo Simulation ───────────────────────────────────────────────────
+
+class MonteCarloRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    symbols: list[str]
+    lookback_days: int = Field(default=365, ge=30, le=730)
+    initial_cash: float = Field(default=1_000_000.0, ge=10_000)
+    commission_rate: float = Field(default=0.0003, ge=0.0, le=0.01)
+    stop_loss_pct: float = Field(default=-0.08, le=0)
+    symbol_loss_cap: float = Field(default=-20_000.0, le=0)
+    n_simulations: int = Field(default=5000, ge=100, le=50_000, description="Bootstrap iterations")
+
+    @field_validator("symbols")
+    @classmethod
+    def symbols_sh_sz_only(cls, v: list[str]) -> list[str]:
+        cleaned = [s.strip().lower() for s in v if s.strip()]
+        if not cleaned:
+            raise ValueError("symbols must contain at least one non-blank entry")
+        bad = [s for s in cleaned if not (s.startswith("sh") or s.startswith("sz"))]
+        if bad:
+            raise ValueError(f"Only SH/SZ symbols supported. Bad: {', '.join(bad)}")
+        return list(dict.fromkeys(cleaned))[:20]
+
+
+class MonteCarloResponse(BaseModel):
+    job_id: str
+    status: str
+    pct: Optional[int] = None
+    step: Optional[str] = None
+    # Results
+    mean_total_return: Optional[float] = None
+    median_total_return: Optional[float] = None
+    std_total_return: Optional[float] = None
+    prob_profit: Optional[float] = None
+    prob_sharpe_above_1: Optional[float] = None
+    percentile_5: Optional[float] = None
+    percentile_25: Optional[float] = None
+    percentile_75: Optional[float] = None
+    percentile_95: Optional[float] = None
+    var_95: Optional[float] = None
+    cvar_95: Optional[float] = None
+    distribution_histogram: list[dict[str, Any]] = []   # [{bin_start, bin_end, count}, ...]
+    error: Optional[str] = None

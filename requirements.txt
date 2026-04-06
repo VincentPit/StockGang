@@ -47,6 +47,7 @@ streamlit>=1.32.0
 python-dotenv>=1.0.0
 pydantic>=2.6.0
 tenacity>=8.2.0          # Retry logic
+apscheduler>=3.10.0      # Cron-based job scheduling for auto-update pipeline
 
 # ── Dev / Testing ─────────────────────────────────────────────
 pytest>=8.1.0

@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY . .
 
 # ── Runtime directories owned by non-root user ────────────────────────────────
-RUN mkdir -p logs data && chown -R app:app /app
+RUN mkdir -p logs data data/model_versions data/cache && chown -R app:app /app
 
 USER app
 

@@ -71,10 +71,12 @@ from api.runner import (  # noqa: E402
     launch_analyze,
     launch_auto_tune,
     launch_backtest,
+    launch_monte_carlo,
     launch_recommend,
     launch_screener,
     launch_train,
     launch_train_loop,
+    launch_walk_forward,
     launch_workflow,
     list_jobs,
     new_job,
@@ -90,6 +92,8 @@ from api.schemas import (  # noqa: E402
     BacktestResponse,
     FundamentalsResponse,
     ModelListResponse,
+    MonteCarloRequest,
+    MonteCarloResponse,
     NewsResponse,
     OrderRequest,
     OrderResponse,
@@ -104,6 +108,8 @@ from api.schemas import (  # noqa: E402
     TrainResponse,
     TrainTrialRow,
     UniverseResponse,
+    WalkForwardRequest,
+    WalkForwardResponse,
     WorkflowRequest,
     WorkflowResponse,
 )
@@ -216,15 +222,35 @@ _startup_at: float = 0.0
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """DB initialisation and cache pruning on startup; graceful teardown on shutdown."""
+    """DB initialisation, cache pruning, and scheduler startup on boot; graceful teardown on shutdown."""
     global _startup_at
     _startup_at = time.time()
     await asyncio.to_thread(_db.init_db)
     deleted = await asyncio.to_thread(_db.purge_expired)
     if deleted:
         _log.info("Pruned %d expired cache rows on startup", deleted)
+
+    # ── Start the auto-update scheduler ───────────────────────────────────
+    _scheduler_enabled = os.getenv("SCHEDULER_ENABLED", "true").lower() in ("1", "true", "yes")
+    if _scheduler_enabled:
+        try:
+            from myquant.scheduler import scheduler_manager
+            await scheduler_manager.start()
+            _log.info("Auto-update scheduler started")
+        except Exception as exc:
+            _log.warning("Scheduler failed to start (non-fatal): %s", exc)
+    else:
+        _log.info("Scheduler disabled via SCHEDULER_ENABLED=false")
+
     _log.info("MyQuant API started")
     yield
+
+    # ── Shutdown scheduler ────────────────────────────────────────────────
+    try:
+        from myquant.scheduler import scheduler_manager
+        await scheduler_manager.shutdown()
+    except Exception:
+        pass
     _log.info("MyQuant API shutting down")
 
 
@@ -243,6 +269,10 @@ app = FastAPI(
     version=_VERSION,
     lifespan=_lifespan,
 )
+
+# ── Register sub-routers ──────────────────────────────────────────────────────
+from api.scheduler_routes import router as _scheduler_router  # noqa: E402
+app.include_router(_scheduler_router)
 
 # Middleware order matters: added last = executed first
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -410,6 +440,25 @@ def _backtest_response(job: dict) -> BacktestResponse:
         symbol_pnl      = job.get("symbol_pnl", []),
         strategy_fills  = job.get("strategy_fills", []),
         error           = job.get("error"),
+        # ── Enhanced analytics ─────────────────────────────────
+        sortino               = job.get("sortino"),
+        calmar                = job.get("calmar"),
+        omega                 = job.get("omega"),
+        annualised_return     = job.get("annualised_return"),
+        annualised_volatility = job.get("annualised_volatility"),
+        max_dd_duration_days  = job.get("max_dd_duration_days"),
+        var_95                = job.get("var_95"),
+        cvar_95               = job.get("cvar_95"),
+        skewness              = job.get("skewness"),
+        kurtosis              = job.get("kurtosis"),
+        ulcer_index           = job.get("ulcer_index"),
+        gain_to_pain          = job.get("gain_to_pain"),
+        monthly_returns       = job.get("monthly_returns", {}),
+        yearly_returns        = job.get("yearly_returns", {}),
+        rolling_sharpe_60d    = job.get("rolling_sharpe_60d", []),
+        strategy_attribution  = job.get("strategy_attribution", []),
+        top_winners           = job.get("top_winners", []),
+        top_losers            = job.get("top_losers", []),
     )
 
 
@@ -523,6 +572,87 @@ def _auto_tune_response(job: dict) -> AutoTuneResponse:
         best_config    = job.get("best_config"),
         iterations     = iterations,
         error          = job.get("error"),
+    )
+
+
+# ── Walk-Forward Validation ───────────────────────────────────────────────────
+
+@app.post("/api/walk-forward", response_model=WalkForwardResponse, status_code=202)
+async def start_walk_forward(req: WalkForwardRequest):
+    """
+    Launch walk-forward out-of-sample validation.
+    Splits the data into rolling train/test windows, runs backtests on each,
+    and measures Sharpe degradation + consistency.
+    """
+    jid = new_job("walk_forward")
+    await launch_walk_forward(jid, req.model_dump())
+    return WalkForwardResponse(job_id=jid, status="pending")
+
+
+@app.get("/api/walk-forward/{job_id}", response_model=WalkForwardResponse)
+async def get_walk_forward(job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _walk_forward_response(job)
+
+
+def _walk_forward_response(job: dict) -> WalkForwardResponse:
+    from api.schemas import WalkForwardFold
+    folds = [
+        WalkForwardFold(**f) for f in job.get("folds", [])
+    ]
+    return WalkForwardResponse(
+        job_id               = job["id"],
+        status               = job["status"],
+        pct                  = job.get("pct"),
+        step                 = job.get("step"),
+        is_robust            = bool(job.get("is_robust")),
+        aggregate_oos_sharpe = job.get("aggregate_oos_sharpe"),
+        sharpe_degradation   = job.get("sharpe_degradation"),
+        consistency_score    = job.get("consistency_score"),
+        stability_score      = job.get("stability_score"),
+        folds                = folds,
+        error                = job.get("error"),
+    )
+
+
+# ── Monte Carlo Simulation ───────────────────────────────────────────────────
+
+@app.post("/api/monte-carlo", response_model=MonteCarloResponse, status_code=202)
+async def start_monte_carlo(req: MonteCarloRequest):
+    """
+    Bootstrap resample the strategy's trade-level P&L to build a
+    probability distribution of outcomes.
+    """
+    jid = new_job("monte_carlo")
+    await launch_monte_carlo(jid, req.model_dump())
+    return MonteCarloResponse(job_id=jid, status="pending")
+
+
+@app.get("/api/monte-carlo/{job_id}", response_model=MonteCarloResponse)
+async def get_monte_carlo(job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return MonteCarloResponse(
+        job_id               = job["id"],
+        status               = job["status"],
+        pct                  = job.get("pct"),
+        step                 = job.get("step"),
+        mean_total_return    = job.get("mean_total_return"),
+        median_total_return  = job.get("median_total_return"),
+        std_total_return     = job.get("std_total_return"),
+        prob_profit          = job.get("prob_profit"),
+        prob_sharpe_above_1  = job.get("prob_sharpe_above_1"),
+        percentile_5         = job.get("percentile_5"),
+        percentile_25        = job.get("percentile_25"),
+        percentile_75        = job.get("percentile_75"),
+        percentile_95        = job.get("percentile_95"),
+        var_95               = job.get("var_95"),
+        cvar_95              = job.get("cvar_95"),
+        distribution_histogram = job.get("distribution_histogram", []),
+        error                = job.get("error"),
     )
 
 

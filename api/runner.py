@@ -343,7 +343,54 @@ def _backtest_core(symbols: list, req: dict) -> dict:
         "trades":         trades,
         "symbol_pnl":     symbol_pnl,
         "strategy_fills": strategy_fills,
+        # ── Enhanced institutional analytics ──────────────────
+        "sortino":              round(result.sortino_ratio, 4),
+        "calmar":               round(result.calmar_ratio, 4),
+        "omega":                round(result.omega_ratio, 4),
+        "annualised_return":    round(result.annualised_return, 6),
+        "annualised_volatility":round(result.annualised_volatility, 6),
+        "max_dd_duration_days": result.max_drawdown_duration_days,
+        "var_95":               round(result.var_95, 6),
+        "cvar_95":              round(result.cvar_95, 6),
+        "skewness":             round(result.skewness, 4),
+        "kurtosis":             round(result.kurtosis, 4),
+        "ulcer_index":          round(result.ulcer_index, 6),
+        "gain_to_pain":         round(result.gain_to_pain, 4),
+        "monthly_returns":      {k: round(v, 6) for k, v in (result.monthly_returns or {}).items()},
+        "yearly_returns":       {k: round(v, 6) for k, v in (result.yearly_returns or {}).items()},
+        "rolling_sharpe_60d":   [{"idx": i, "sharpe": round(v, 4)} for i, v in enumerate(result.rolling_sharpe_60d or [])],
+        # Attribution
+        "strategy_attribution": _extract_strategy_attribution(result),
+        "top_winners":          _extract_top_symbols(result, top=True),
+        "top_losers":           _extract_top_symbols(result, top=False),
     }
+
+
+def _extract_strategy_attribution(result) -> list[dict]:
+    """Extract strategy-level P&L attribution from BacktestResult."""
+    if result.attribution_report is None:
+        return []
+    return [
+        {
+            "strategy": c.strategy_id,
+            "pnl":      round(c.gross_pnl, 2),
+            "pct":      round(c.pct_of_total, 4),
+            "trades":   c.num_trades,
+            "win_rate": round(c.win_rate, 4),
+        }
+        for c in result.attribution_report.strategy_contributions
+    ]
+
+
+def _extract_top_symbols(result, top: bool = True) -> list[dict]:
+    """Extract top winning or losing symbols from attribution."""
+    if result.attribution_report is None:
+        return []
+    syms = result.attribution_report.top_symbols if top else result.attribution_report.bottom_symbols
+    return [
+        {"symbol": s.symbol, "pnl": round(s.gross_pnl, 2), "trades": s.num_trades}
+        for s in syms
+    ]
 
 
 # ── price / OHLCV ─────────────────────────────────────────────────────────────
@@ -817,3 +864,246 @@ def _run_recommend_sync(jid: str, sector: str | None, top_n: int) -> None:
 
 async def launch_recommend(jid: str, sector: str | None = None, top_n: int = 10) -> None:
     asyncio.get_running_loop().run_in_executor(_executor, _run_recommend_sync, jid, sector, top_n)
+
+
+# ── Walk-Forward Validation ───────────────────────────────────────────────────
+
+def _run_walk_forward_sync(jid: str, req: dict) -> None:
+    """Run walk-forward OOS validation in a background thread."""
+    try:
+        _update_job(jid, {"status": "running", "pct": 5, "step": "Loading data for walk-forward…"})
+
+        # 1. Run the full backtest to get trade data
+        result_dict = _backtest_core(req["symbols"], req)
+        _update_job(jid, {"pct": 40, "step": "Running walk-forward splits…"})
+
+        # 2. Extract trade PnL series for walk-forward analysis
+        from myquant.backtest.walk_forward import WalkForwardValidator, MonteCarloSimulator
+        import numpy as np
+
+        # Build per-trade PnL from the trades
+        trades = result_dict.get("trades", [])
+        trade_pnls = _extract_trade_pnls(trades)
+
+        n_splits = req.get("n_splits", 5)
+        train_ratio = req.get("train_ratio", 0.70)
+
+        if len(trade_pnls) < n_splits * 2:
+            _update_job(jid, {
+                "status": "done", "pct": 100, "step": "Done — insufficient trades",
+                "is_robust": False,
+                "aggregate_oos_sharpe": result_dict.get("sharpe", 0.0),
+                "sharpe_degradation": 0.0,
+                "consistency_score": 0.0,
+                "stability_score": 0.0,
+                "folds": [],
+            })
+            return
+
+        # Simulate walk-forward by splitting trades chronologically
+        folds = []
+        chunk_size = max(1, len(trade_pnls) // n_splits)
+        in_sample_sharpes = []
+        oos_sharpes = []
+
+        for i in range(n_splits):
+            split_point = int(len(trade_pnls) * train_ratio * (i + 1) / n_splits)
+            is_pnls = trade_pnls[:split_point]
+            oos_pnls = trade_pnls[split_point:split_point + chunk_size]
+
+            if len(is_pnls) < 2 or len(oos_pnls) < 1:
+                continue
+
+            is_sharpe = _quick_sharpe(is_pnls)
+            oos_sharpe = _quick_sharpe(oos_pnls)
+            oos_return = sum(oos_pnls) / req.get("initial_cash", 1_000_000)
+            oos_max_dd = _quick_max_dd(oos_pnls, req.get("initial_cash", 1_000_000))
+
+            wins = sum(1 for p in oos_pnls if p > 0)
+            oos_wr = wins / len(oos_pnls) if oos_pnls else 0
+
+            in_sample_sharpes.append(is_sharpe)
+            oos_sharpes.append(oos_sharpe)
+
+            folds.append({
+                "fold": i + 1,
+                "train_start": "",
+                "train_end": "",
+                "test_start": "",
+                "test_end": "",
+                "in_sample_sharpe": round(is_sharpe, 4),
+                "out_of_sample_sharpe": round(oos_sharpe, 4),
+                "oos_return": round(oos_return, 6),
+                "oos_max_dd": round(oos_max_dd, 6),
+                "oos_win_rate": round(oos_wr, 4),
+            })
+
+        _update_job(jid, {"pct": 80, "step": "Computing robustness metrics…"})
+
+        avg_is = np.mean(in_sample_sharpes) if in_sample_sharpes else 0
+        avg_oos = np.mean(oos_sharpes) if oos_sharpes else 0
+        degradation = 1 - (avg_oos / avg_is) if avg_is != 0 else 0
+        consistency = sum(1 for s in oos_sharpes if s > 0) / len(oos_sharpes) if oos_sharpes else 0
+        stability = 1 - (np.std(oos_sharpes) / (abs(avg_oos) + 1e-10)) if oos_sharpes else 0
+
+        is_robust = avg_oos > 0.3 and degradation < 0.5 and consistency >= 0.6
+
+        _update_job(jid, {
+            "status": "done", "pct": 100, "step": "Done",
+            "is_robust": is_robust,
+            "aggregate_oos_sharpe": round(avg_oos, 4),
+            "sharpe_degradation": round(degradation, 4),
+            "consistency_score": round(consistency, 4),
+            "stability_score": round(max(0, min(1, stability)), 4),
+            "folds": folds,
+        })
+
+    except Exception:
+        tb = traceback.format_exc()
+        _log.error("walk_forward job %s failed: %s", jid[:8], tb.splitlines()[-1])
+        _update_job(jid, {"status": "error", "error": tb})
+
+
+async def launch_walk_forward(jid: str, req: dict) -> None:
+    asyncio.get_running_loop().run_in_executor(_executor, _run_walk_forward_sync, jid, req)
+
+
+# ── Monte Carlo Simulation ───────────────────────────────────────────────────
+
+def _run_monte_carlo_sync(jid: str, req: dict) -> None:
+    """Bootstrap resample trades to build outcome probability distribution."""
+    try:
+        _update_job(jid, {"status": "running", "pct": 5, "step": "Running base backtest…"})
+
+        result_dict = _backtest_core(req["symbols"], req)
+        _update_job(jid, {"pct": 50, "step": "Running Monte Carlo simulation…"})
+
+        import numpy as np
+
+        trades = result_dict.get("trades", [])
+        trade_pnls = _extract_trade_pnls(trades)
+
+        if len(trade_pnls) < 5:
+            _update_job(jid, {
+                "status": "done", "pct": 100, "step": "Done — too few trades for MC",
+                "mean_total_return": 0.0,
+                "median_total_return": 0.0,
+                "prob_profit": 0.0,
+            })
+            return
+
+        n_sims = req.get("n_simulations", 5000)
+        initial_cash = req.get("initial_cash", 1_000_000)
+        pnl_arr = np.array(trade_pnls, dtype=np.float64)
+        n_trades = len(pnl_arr)
+
+        # Bootstrap: resample with replacement
+        rng = np.random.default_rng(42)
+        sim_totals = np.empty(n_sims)
+        sim_sharpes = np.empty(n_sims)
+
+        for i in range(n_sims):
+            sampled = rng.choice(pnl_arr, size=n_trades, replace=True)
+            sim_totals[i] = sampled.sum() / initial_cash
+            mean_r = sampled.mean()
+            std_r = sampled.std()
+            sim_sharpes[i] = (mean_r / std_r * np.sqrt(252)) if std_r > 0 else 0
+
+        _update_job(jid, {"pct": 85, "step": "Computing statistics…"})
+
+        # Build histogram (30 bins)
+        hist_counts, bin_edges = np.histogram(sim_totals, bins=30)
+        histogram = [
+            {
+                "bin_start": round(float(bin_edges[j]), 6),
+                "bin_end":   round(float(bin_edges[j + 1]), 6),
+                "count":     int(hist_counts[j]),
+            }
+            for j in range(len(hist_counts))
+        ]
+
+        _update_job(jid, {
+            "status": "done", "pct": 100, "step": "Done",
+            "mean_total_return":   round(float(np.mean(sim_totals)), 6),
+            "median_total_return": round(float(np.median(sim_totals)), 6),
+            "std_total_return":    round(float(np.std(sim_totals)), 6),
+            "prob_profit":         round(float((sim_totals > 0).mean()), 4),
+            "prob_sharpe_above_1": round(float((sim_sharpes > 1.0).mean()), 4),
+            "percentile_5":        round(float(np.percentile(sim_totals, 5)), 6),
+            "percentile_25":       round(float(np.percentile(sim_totals, 25)), 6),
+            "percentile_75":       round(float(np.percentile(sim_totals, 75)), 6),
+            "percentile_95":       round(float(np.percentile(sim_totals, 95)), 6),
+            "var_95":              round(float(-np.percentile(sim_totals, 5)), 6),
+            "cvar_95":             round(float(-sim_totals[sim_totals <= np.percentile(sim_totals, 5)].mean()) if (sim_totals <= np.percentile(sim_totals, 5)).any() else 0, 6),
+            "distribution_histogram": histogram,
+        })
+
+    except Exception:
+        tb = traceback.format_exc()
+        _log.error("monte_carlo job %s failed: %s", jid[:8], tb.splitlines()[-1])
+        _update_job(jid, {"status": "error", "error": tb})
+
+
+async def launch_monte_carlo(jid: str, req: dict) -> None:
+    asyncio.get_running_loop().run_in_executor(_executor, _run_monte_carlo_sync, jid, req)
+
+
+# ── Helper utilities ──────────────────────────────────────────────────────────
+
+def _extract_trade_pnls(trades: list[dict]) -> list[float]:
+    """Extract per-trade realized P&L from a list of fill dicts using FIFO matching."""
+    from collections import defaultdict
+    buy_queues: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    pnls: list[float] = []
+
+    for t in trades:
+        sym = t.get("symbol", "")
+        qty = float(t.get("qty", 0))
+        price = float(t.get("price", 0))
+        comm = float(t.get("commission", 0))
+
+        if t.get("side") == "BUY":
+            buy_queues[sym].append((qty, price + comm / max(qty, 1)))
+        elif t.get("side") == "SELL":
+            remaining = qty
+            pnl = -comm
+            bq = buy_queues[sym]
+            while remaining > 0 and bq:
+                bqty, bprice = bq[0]
+                matched = min(remaining, bqty)
+                pnl += matched * (price - bprice)
+                remaining -= matched
+                if matched < bqty:
+                    bq[0] = (bqty - matched, bprice)
+                else:
+                    bq.pop(0)
+            pnls.append(pnl)
+    return pnls
+
+
+def _quick_sharpe(pnls: list[float]) -> float:
+    """Quick annualised Sharpe from a list of P&L values."""
+    import numpy as np
+    if len(pnls) < 2:
+        return 0.0
+    arr = np.array(pnls, dtype=np.float64)
+    mean_r = arr.mean()
+    std_r = arr.std()
+    if std_r == 0:
+        return 0.0
+    return float(mean_r / std_r * np.sqrt(252))
+
+
+def _quick_max_dd(pnls: list[float], initial: float) -> float:
+    """Quick max drawdown from cumulative P&L."""
+    nav = initial
+    peak = initial
+    max_dd = 0.0
+    for p in pnls:
+        nav += p
+        if nav > peak:
+            peak = nav
+        dd = (nav - peak) / peak if peak > 0 else 0
+        if dd < max_dd:
+            max_dd = dd
+    return max_dd

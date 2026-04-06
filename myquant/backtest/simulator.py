@@ -18,6 +18,8 @@ from typing import Optional
 
 import pandas as pd
 
+from myquant.analytics.performance import PerformanceAnalyzer, PerformanceReport
+from myquant.analytics.attribution import FactorAttribution, AttributionReport
 from myquant.config.logging_config import get_logger
 from myquant.data.fetchers.historical_loader import HistoricalLoader
 from myquant.data.fetchers.macro_proxy import HistoricalRegimeDetector
@@ -68,24 +70,67 @@ class BacktestResult:
     avg_loss: float = 0.0
     profit_factor: float = 0.0
 
+    # ── Enhanced analytics (populated by PerformanceAnalyzer) ──
+    sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0
+    omega_ratio: float = 0.0
+    annualised_return: float = 0.0
+    annualised_volatility: float = 0.0
+    max_drawdown_duration_days: int = 0
+    var_95: float = 0.0
+    cvar_95: float = 0.0
+    skewness: float = 0.0
+    kurtosis: float = 0.0
+    ulcer_index: float = 0.0
+    gain_to_pain: float = 0.0
+    monthly_returns: dict = field(default_factory=dict)
+    yearly_returns: dict = field(default_factory=dict)
+    rolling_sharpe_60d: list = field(default_factory=list)
+    # Full performance report object
+    performance_report: Optional[PerformanceReport] = None
+    # Attribution report
+    attribution_report: Optional[AttributionReport] = None
+
     def summary(self) -> str:
         lines = [
-            "=" * 50,
-            "        BACKTEST RESULTS",
-            "=" * 50,
-            f"  Period     : {self.config.start_date.date()} → {self.config.end_date.date()}",
-            f"  Symbols    : {', '.join(self.config.symbols)}",
-            f"  Initial NAV: {self.config.initial_cash:>12,.2f}",
-            f"  Final NAV  : {self.config.initial_cash + self.total_pnl:>12,.2f}",
-            f"  Total PnL  : {self.total_pnl:>+12,.2f}  ({self.total_pnl_pct:+.2%})",
-            f"  Sharpe     : {self.sharpe_ratio:>12.3f}",
-            f"  Max DD     : {self.max_drawdown:>12.2%}",
-            f"  # Trades   : {self.num_trades:>12}",
-            f"  Win Rate   : {self.win_rate:>12.2%}",
-            f"  Avg Win    : {self.avg_win:>+12.2f}",
-            f"  Avg Loss   : {self.avg_loss:>+12.2f}",
-            f"  Profit Fac : {self.profit_factor:>12.3f}",
-            "=" * 50,
+            "=" * 60,
+            "         BACKTEST RESULTS — INSTITUTIONAL ANALYTICS",
+            "=" * 60,
+            f"  Period       : {self.config.start_date.date()} → {self.config.end_date.date()}",
+            f"  Symbols      : {', '.join(self.config.symbols)}",
+            f"  Initial NAV  : {self.config.initial_cash:>12,.2f}",
+            f"  Final NAV    : {self.config.initial_cash + self.total_pnl:>12,.2f}",
+            "-" * 60,
+            "  RETURNS",
+            f"  Total PnL    : {self.total_pnl:>+12,.2f}  ({self.total_pnl_pct:+.2%})",
+            f"  Ann. Return  : {self.annualised_return:>+12.2%}",
+            f"  Ann. Vol     : {self.annualised_volatility:>12.2%}",
+            "-" * 60,
+            "  RISK-ADJUSTED",
+            f"  Sharpe       : {self.sharpe_ratio:>12.3f}",
+            f"  Sortino      : {self.sortino_ratio:>12.3f}",
+            f"  Calmar       : {self.calmar_ratio:>12.3f}",
+            f"  Omega        : {self.omega_ratio:>12.3f}",
+            f"  Gain/Pain    : {self.gain_to_pain:>12.3f}",
+            "-" * 60,
+            "  DRAWDOWN",
+            f"  Max DD       : {self.max_drawdown:>12.2%}",
+            f"  Max DD Days  : {self.max_drawdown_duration_days:>12}",
+            f"  Ulcer Index  : {self.ulcer_index:>12.4f}",
+            "-" * 60,
+            "  TAIL RISK",
+            f"  VaR (95%)    : {self.var_95:>12.4f}",
+            f"  CVaR (95%)   : {self.cvar_95:>12.4f}",
+            f"  Skewness     : {self.skewness:>12.3f}",
+            f"  Kurtosis     : {self.kurtosis:>12.3f}",
+            "-" * 60,
+            "  TRADES",
+            f"  # Trades     : {self.num_trades:>12}",
+            f"  Win Rate     : {self.win_rate:>12.2%}",
+            f"  Avg Win      : {self.avg_win:>+12.2f}",
+            f"  Avg Loss     : {self.avg_loss:>+12.2f}",
+            f"  Profit Factor: {self.profit_factor:>12.3f}",
+            "=" * 60,
         ]
         return "\n".join(lines)
 
@@ -519,6 +564,47 @@ class Backtester:
 
         total_pnl = self._portfolio.total_pnl
 
+        # ── Run institutional-grade performance analytics ─────
+        perf_report = None
+        attribution_report = None
+        sortino = calmar = omega = 0.0
+        ann_ret = ann_vol = 0.0
+        dd_dur = 0
+        var95 = cvar95 = skew = kurt = 0.0
+        ulcer = gtp = 0.0
+        monthly_rets: dict = {}
+        yearly_rets: dict = {}
+        rolling_sharpe: list = []
+
+        try:
+            analyzer = PerformanceAnalyzer()
+            perf_report = analyzer.analyze(nav_series, trades_df)
+            sortino = perf_report.sortino
+            calmar = perf_report.calmar
+            omega = perf_report.omega
+            ann_ret = perf_report.annualised_return
+            ann_vol = perf_report.annualised_volatility
+            dd_dur = perf_report.max_drawdown_duration_days
+            var95 = perf_report.var_95
+            cvar95 = perf_report.cvar_95
+            skew = perf_report.skewness
+            kurt = perf_report.kurtosis
+            ulcer = perf_report.ulcer_index
+            gtp = perf_report.gain_to_pain
+            monthly_rets = perf_report.monthly_returns
+            yearly_rets = perf_report.yearly_returns
+            rolling_sharpe = list(perf_report.rolling_sharpe_60d.values()) if perf_report.rolling_sharpe_60d else []
+            logger.info("Performance analytics complete — Sortino=%.3f, Calmar=%.3f", sortino, calmar)
+        except Exception as e:
+            logger.warning("Performance analytics failed: %s", e)
+
+        try:
+            attrib = FactorAttribution()
+            attribution_report = attrib.analyze(trades_df, nav_series)
+            logger.info("Attribution analytics complete — %d strategy contributions", len(attribution_report.strategy_contributions))
+        except Exception as e:
+            logger.warning("Attribution analytics failed: %s", e)
+
         result = BacktestResult(
             config=self.config,
             nav_series=nav_series,
@@ -532,6 +618,24 @@ class Backtester:
             avg_win=avg_win,
             avg_loss=avg_loss,
             profit_factor=profit_factor,
+            # Enhanced analytics
+            sortino_ratio=sortino,
+            calmar_ratio=calmar,
+            omega_ratio=omega,
+            annualised_return=ann_ret,
+            annualised_volatility=ann_vol,
+            max_drawdown_duration_days=dd_dur,
+            var_95=var95,
+            cvar_95=cvar95,
+            skewness=skew,
+            kurtosis=kurt,
+            ulcer_index=ulcer,
+            gain_to_pain=gtp,
+            monthly_returns=monthly_rets,
+            yearly_returns=yearly_rets,
+            rolling_sharpe_60d=rolling_sharpe,
+            performance_report=perf_report,
+            attribution_report=attribution_report,
         )
         return result
 

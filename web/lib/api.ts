@@ -97,6 +97,25 @@ export interface BacktestResult {
   symbol_pnl: SymbolPnL[];
   strategy_fills: StrategyFills[];
   error?: string;
+  // ── Enhanced institutional analytics ──────────────────────
+  sortino?: number;
+  calmar?: number;
+  omega?: number;
+  annualised_return?: number;
+  annualised_volatility?: number;
+  max_dd_duration_days?: number;
+  var_95?: number;
+  cvar_95?: number;
+  skewness?: number;
+  kurtosis?: number;
+  ulcer_index?: number;
+  gain_to_pain?: number;
+  monthly_returns?: Record<string, number>;
+  yearly_returns?: Record<string, number>;
+  rolling_sharpe_60d?: { idx: number; sharpe: number }[];
+  strategy_attribution?: { strategy: string; pnl: number; pct: number; trades: number; win_rate: number }[];
+  top_winners?: { symbol: string; pnl: number; trades: number }[];
+  top_losers?: { symbol: string; pnl: number; trades: number }[];
 }
 
 export interface BacktestRequest {
@@ -782,5 +801,176 @@ export async function startAutoTune(req: AutoTuneRequest): Promise<AutoTuneResul
 
 export async function getAutoTune(jobId: string): Promise<AutoTuneResult> {
   const res = await apiFetch(`${BASE}/auto-tune/${jobId}`);
+  return res.json();
+}
+
+
+// ── Walk-Forward Validation ──────────────────────────────────────────────────
+
+export interface WalkForwardRequest {
+  symbols: string[];
+  lookback_days?: number;
+  initial_cash?: number;
+  commission_rate?: number;
+  stop_loss_pct?: number;
+  symbol_loss_cap?: number;
+  train_ratio?: number;
+  n_splits?: number;
+}
+
+export interface WalkForwardFold {
+  fold: number;
+  train_start: string;
+  train_end: string;
+  test_start: string;
+  test_end: string;
+  in_sample_sharpe: number;
+  out_of_sample_sharpe: number;
+  oos_return: number;
+  oos_max_dd: number;
+  oos_win_rate: number;
+}
+
+export interface WalkForwardResult {
+  job_id: string;
+  status: string;
+  pct?: number;
+  step?: string;
+  is_robust: boolean;
+  aggregate_oos_sharpe?: number;
+  sharpe_degradation?: number;
+  consistency_score?: number;
+  stability_score?: number;
+  folds: WalkForwardFold[];
+  error?: string;
+}
+
+export async function startWalkForward(req: WalkForwardRequest): Promise<WalkForwardResult> {
+  const res = await apiFetch(`${BASE}/walk-forward`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }, 60_000);
+  return res.json();
+}
+
+export async function getWalkForward(jobId: string): Promise<WalkForwardResult> {
+  const res = await apiFetch(`${BASE}/walk-forward/${jobId}`);
+  return res.json();
+}
+
+
+// ── Monte Carlo Simulation ───────────────────────────────────────────────────
+
+export interface MonteCarloRequest {
+  symbols: string[];
+  lookback_days?: number;
+  initial_cash?: number;
+  commission_rate?: number;
+  stop_loss_pct?: number;
+  symbol_loss_cap?: number;
+  n_simulations?: number;
+}
+
+export interface MonteCarloResult {
+  job_id: string;
+  status: string;
+  pct?: number;
+  step?: string;
+  mean_total_return?: number;
+  median_total_return?: number;
+  std_total_return?: number;
+  prob_profit?: number;
+  prob_sharpe_above_1?: number;
+  percentile_5?: number;
+  percentile_25?: number;
+  percentile_75?: number;
+  percentile_95?: number;
+  var_95?: number;
+  cvar_95?: number;
+  distribution_histogram?: { bin_start: number; bin_end: number; count: number }[];
+  error?: string;
+}
+
+export async function startMonteCarlo(req: MonteCarloRequest): Promise<MonteCarloResult> {
+  const res = await apiFetch(`${BASE}/monte-carlo`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }, 120_000);
+  return res.json();
+}
+
+export async function getMonteCarlo(jobId: string): Promise<MonteCarloResult> {
+  const res = await apiFetch(`${BASE}/monte-carlo/${jobId}`);
+  return res.json();
+}
+
+
+// ── Scheduler (Auto-Update Pipeline) ──────────────────────────────────────────
+
+export interface SchedulerStatus {
+  scheduler_running: boolean;
+  enabled: boolean;
+  paused: boolean;
+  data_status: string;
+  data_last_run?: string;
+  data_last_success?: string;
+  data_last_error?: string;
+  data_symbols_updated: number;
+  data_run_count: number;
+  data_fail_count: number;
+  retrain_status: string;
+  retrain_last_run?: string;
+  retrain_last_success?: string;
+  retrain_last_error?: string;
+  retrain_models_updated: number;
+  retrain_run_count: number;
+  retrain_fail_count: number;
+  strategy_status: string;
+  strategy_last_run?: string;
+  strategy_last_success?: string;
+  last_oos_accuracy?: number;
+  last_sharpe?: number;
+  last_profit_factor?: number;
+  last_model_score?: number;
+  next_scheduled_runs: Record<string, string>;
+  tracked_symbols: string[];
+  recent_runs: {
+    type: string;
+    started_at: string;
+    finished_at?: string;
+    status: string;
+    error?: string;
+    [key: string]: unknown;
+  }[];
+}
+
+export async function getSchedulerStatus(): Promise<SchedulerStatus> {
+  const res = await apiFetch(`${BASE}/scheduler/status`);
+  return res.json();
+}
+
+export async function triggerScheduler(jobType: string = "full"): Promise<{ triggered?: string; error?: string }> {
+  const res = await apiFetch(`${BASE}/scheduler/trigger`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_type: jobType }),
+  }, 10_000);
+  return res.json();
+}
+
+export async function pauseScheduler(): Promise<{ paused: boolean }> {
+  const res = await apiFetch(`${BASE}/scheduler/pause`, { method: "POST" });
+  return res.json();
+}
+
+export async function resumeScheduler(): Promise<{ paused: boolean }> {
+  const res = await apiFetch(`${BASE}/scheduler/resume`, { method: "POST" });
+  return res.json();
+}
+
+export async function getSchedulerHistory(limit = 20): Promise<{ runs: SchedulerStatus["recent_runs"]; total: number }> {
+  const res = await apiFetch(`${BASE}/scheduler/history?limit=${limit}`);
   return res.json();
 }

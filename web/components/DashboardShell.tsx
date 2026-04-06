@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
   BarChart2, Search, Rocket, Brain, Repeat2, ChevronRight, X,
-  RefreshCw, Sparkles,
+  RefreshCw, Sparkles, Shield, Dice5, Activity,
 } from "lucide-react";
 import { listModels } from "@/lib/api";
 import type { StoredModelInfo } from "@/lib/api";
@@ -35,8 +35,24 @@ const NAV_ITEMS = [
     group: "Research",
     label: "Backtest",
     Icon: BarChart2,
-    tagline: "Test any symbols",
-    desc: "Run a historical simulation on specific symbols you choose. Great for validating a specific idea or comparing individual stocks.",
+    tagline: "Institutional analytics",
+    desc: "Run a historical simulation with full performance tearsheet: Sharpe, Sortino, Calmar, VaR, factor attribution, monthly returns heatmap, and strategy P&L decomposition.",
+  },
+  {
+    href: "/walkforward",
+    group: "Research",
+    label: "Walk-Forward",
+    Icon: Shield,
+    tagline: "Validate robustness",
+    desc: "Split data into rolling train/test windows to measure out-of-sample Sharpe degradation, consistency, and parameter stability. Proves your alpha is real.",
+  },
+  {
+    href: "/montecarlo",
+    group: "Research",
+    label: "Monte Carlo",
+    Icon: Dice5,
+    tagline: "Stress test outcomes",
+    desc: "Bootstrap resample 5,000+ trade-level P&Ls to build a probability distribution of returns. Shows P(profit), confidence intervals, and tail risk.",
   },
   {
     href: "/autotune",
@@ -61,6 +77,14 @@ const NAV_ITEMS = [
     Icon: Repeat2,
     tagline: "Manual training",
     desc: "Screens the market, trains an LGBM model on the best stocks, and auto-tunes strategy parameters. For advanced users who want fine-grained control.",
+  },
+  {
+    href: "/scheduler",
+    group: "Models",
+    label: "Scheduler",
+    Icon: Activity,
+    tagline: "Auto-update pipeline",
+    desc: "Automated daily pipeline: fetches fresh market data after close, retrains models, updates strategy parameters, and runs a deep weekend auto-tune.",
   },
 ] as const;
 
