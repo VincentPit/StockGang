@@ -17,9 +17,23 @@ async function _throwApiError(res: Response): Promise<never> {
   throw new Error(message);
 }
 
+// ── Trace context ────────────────────────────────────────────────────────────
+// Generate a W3C `traceparent` header so the API can correlate the browser
+// request with downstream API → worker → DB spans in Tempo. Format:
+//   00-<trace-id 16 bytes hex>-<span-id 8 bytes hex>-01
+function _hex(bytes: number): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+function _traceparent(): string {
+  return `00-${_hex(16)}-${_hex(8)}-01`;
+}
+
 // ── Fetch wrapper ─────────────────────────────────────────────────────────────
 // • Throws a human-readable error on non-2xx responses.
 // • Aborts the request after timeoutMs (default 30 s) to prevent hung UI.
+// • Stamps a W3C `traceparent` so backend OTel picks up the trace context.
 async function apiFetch(
   url: string,
   init?: RequestInit,
@@ -27,8 +41,10 @@ async function apiFetch(
 ): Promise<Response> {
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), timeoutMs);
+  const headers = new Headers(init?.headers);
+  if (!headers.has("traceparent")) headers.set("traceparent", _traceparent());
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, headers, signal: controller.signal });
     if (!res.ok) await _throwApiError(res);
     return res;
   } catch (err) {
