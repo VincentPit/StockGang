@@ -26,10 +26,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Runtime libs only — curl for healthcheck, libpq for psycopg2
+# Runtime libs — curl for healthcheck, libpq for psycopg2, libgomp for LightGBM
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         libpq5 \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user matching the builder UID/GID
