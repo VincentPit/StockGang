@@ -1,9 +1,16 @@
 """
 api/runner.py — Background job runner.
 
-Runs backtests and screener jobs in a thread pool so the API stays async.
-Jobs are stored in an in-process dict (sufficient for single-node; swap for
-Redis if you go multi-process).
+Two execution modes (toggled by MYQUANT_QUEUE):
+
+  * ``threadpool`` (default during T1b cutover): jobs run in an in-process
+    ThreadPoolExecutor; a local ``_jobs`` dict mirrors Postgres for fast reads.
+  * ``arq``: jobs are enqueued to Redis and consumed by ``myquant.workers``
+    in a separate process. The API never executes job code itself — it only
+    enqueues, then reads job state through Postgres.
+
+Public callers (api/main.py) use the same ``launch_*`` / ``get_job`` /
+``list_jobs`` API in either mode.
 """
 from __future__ import annotations
 
@@ -23,14 +30,22 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from api import db as _db
+from myquant.config.settings import settings
 
 _log = logging.getLogger(__name__)
+
+# ── Queue mode ───────────────────────────────────────────────────────────────
+# "threadpool" runs jobs in this process; "arq" enqueues to Redis. The API
+# can read job state in either mode because every status change is persisted
+# to Postgres by ``_update_job`` below.
+_QUEUE_MODE = settings.MYQUANT_QUEUE if settings.MYQUANT_QUEUE in ("threadpool", "arq") else "threadpool"
 
 # Scale thread pool to CPU count; cap at 16 so we don't starve the event loop
 _executor = ThreadPoolExecutor(max_workers=min((os.cpu_count() or 2) * 2, 16))
 atexit.register(_executor.shutdown, wait=False)  # graceful drain on process exit
 
-# In-memory mirror — fast O(1) reads during a session
+# In-memory mirror — fast O(1) reads during a session (threadpool mode only;
+# in arq mode the API process never owns a job, so the dict stays empty).
 _jobs: dict[str, dict[str, Any]] = {}
 
 # Maximum number of done/error jobs to keep in memory to prevent unbounded growth
@@ -40,19 +55,51 @@ _MAX_JOBS: int = 500
 _db.init_db()
 _jobs.update({j["id"]: j for j in _db.fetch_all_jobs()})
 
-# Mark orphaned "running"/"pending" jobs from a previous server session.
-# The threads that were executing them are gone — they'll never finish.
-for _j in list(_jobs.values()):
-    if _j.get("status") in ("running", "pending"):
-        _log.warning(
-            "Marking orphaned job %s (%s) as error — server was restarted while it was %s",
-            _j["id"][:8], _j.get("kind", "?"), _j["status"],
-        )
-        _j.update({
-            "status": "error",
-            "error":  f"Job interrupted by server restart (was {_j['status']} at pct={_j.get('pct', '?')})",
-        })
-        _db.upsert_job(_j)
+# Mark orphaned "running"/"pending" jobs from a previous server session — only
+# meaningful in threadpool mode, where the executor that owned them is gone.
+# Under arq, a different worker may still be processing them, so we don't touch
+# their state from the API process.
+if _QUEUE_MODE == "threadpool":
+    for _j in list(_jobs.values()):
+        if _j.get("status") in ("running", "pending"):
+            _log.warning(
+                "Marking orphaned job %s (%s) as error — server was restarted while it was %s",
+                _j["id"][:8], _j.get("kind", "?"), _j["status"],
+            )
+            _j.update({
+                "status": "error",
+                "error":  f"Job interrupted by server restart (was {_j['status']} at pct={_j.get('pct', '?')})",
+            })
+            _db.upsert_job(_j)
+
+
+# ── Arq pool (lazy) ───────────────────────────────────────────────────────────
+# A single arq.ArqRedis connection is shared by all enqueue calls in this
+# process. Created on first use to avoid touching Redis at import time when
+# the queue mode is "threadpool".
+_arq_pool: Any = None
+_arq_pool_lock = asyncio.Lock()
+
+
+async def _get_arq_pool():
+    """Lazy-initialise the Arq Redis pool. Only called when MYQUANT_QUEUE=arq."""
+    global _arq_pool
+    if _arq_pool is not None:
+        return _arq_pool
+    async with _arq_pool_lock:
+        if _arq_pool is not None:
+            return _arq_pool
+        from arq import create_pool
+        from myquant.workers.worker import redis_settings
+        _arq_pool = await create_pool(redis_settings())
+        _log.info("Arq pool created (queue=%s)", "myquant:jobs")
+        return _arq_pool
+
+
+async def _enqueue(task_name: str, *args: Any) -> None:
+    """Enqueue an Arq task. ``task_name`` is the coroutine name in workers.tasks."""
+    pool = await _get_arq_pool()
+    await pool.enqueue_job(task_name, *args, _queue_name="myquant:jobs")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -67,13 +114,55 @@ def _evict_stale_jobs() -> None:
     to_drop = max(0, len(_jobs) - _MAX_JOBS)
     for j in candidates[:to_drop]:
         _jobs.pop(j["id"], None)
+def _emit_metrics(prev_status: str | None, new_status: str | None, kind: str, started_ts: float | None) -> None:
+    """Update Prometheus counters/histograms on job state transitions.
+
+    Optional: if observability deps are missing the call short-circuits.
+    """
+    if new_status is None or new_status == prev_status:
+        return
+    try:
+        from myquant.observability.metrics import (
+            JOB_DURATION, JOB_FAILURES_TOTAL, JOB_STARTED_TOTAL, JOBS_INFLIGHT,
+        )
+    except Exception:
+        return
+    if new_status == "running" and prev_status != "running":
+        JOB_STARTED_TOTAL.labels(kind=kind).inc()
+        JOBS_INFLIGHT.labels(kind=kind).inc()
+    if new_status in ("done", "error"):
+        if prev_status in ("pending", "running", "screening", "backtesting"):
+            JOBS_INFLIGHT.labels(kind=kind).dec()
+        if started_ts:
+            JOB_DURATION.labels(kind=kind, outcome=new_status).observe(max(0.0, time.time() - started_ts))
+        if new_status == "error":
+            JOB_FAILURES_TOTAL.labels(kind=kind).inc()
+
+
 def _update_job(jid: str, updates: dict) -> None:
-    """Mutate in-memory dict and write-through to SQLite atomically."""
+    """Mutate in-memory dict and write-through to Postgres atomically.
+
+    In arq mode this runs in a worker process, where ``_jobs`` starts empty;
+    we hydrate from Postgres on the first write so the worker has the full
+    payload (kind, _ts, etc.) before merging updates.
+    """
     updates["_updated_at"] = time.time()      # heartbeat — lets clients detect stale jobs
+    if jid not in _jobs:
+        existing = _db.fetch_job(jid)
+        if existing is None:
+            existing = {"id": jid, "kind": "unknown", "status": "pending", "_ts": time.time()}
+        _jobs[jid] = existing
+    prev_status = _jobs[jid].get("status")
     _jobs[jid].update(updates)
     _db.upsert_job(_jobs[jid])
     if "status" in updates:
         _log.info("job %s → %s", jid[:8], updates["status"])
+        _emit_metrics(
+            prev_status=prev_status,
+            new_status=updates["status"],
+            kind=_jobs[jid].get("kind", "unknown"),
+            started_ts=_jobs[jid].get("_ts"),
+        )
 
 
 def new_job(kind: str) -> str:
@@ -86,10 +175,18 @@ def new_job(kind: str) -> str:
 
 
 def get_job(jid: str) -> dict[str, Any] | None:
+    """Look up a job. In arq mode the worker writes status — we read from
+    Postgres unless a fresh in-memory copy exists in this process.
+    """
+    if _QUEUE_MODE == "arq":
+        # Postgres is authoritative under arq because workers run elsewhere.
+        return _db.fetch_job(jid)
     return _jobs.get(jid)
 
 
 def list_jobs() -> list[dict[str, Any]]:
+    if _QUEUE_MODE == "arq":
+        return _db.fetch_all_jobs()
     return list(_jobs.values())
 
 
@@ -108,7 +205,10 @@ def _run_backtest_sync(jid: str, req: dict) -> None:
 
 
 async def launch_backtest(jid: str, req: dict) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_backtest_sync, jid, req)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_backtest", jid, req)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_backtest_sync, jid, req)
 
 
 # ── screener ─────────────────────────────────────────────────────────────────
@@ -173,7 +273,10 @@ def _run_screener_sync(jid: str, req: dict) -> None:
 
 
 async def launch_screener(jid: str, req: dict) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_screener_sync, jid, req)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_screener", jid, req)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_screener_sync, jid, req)
 
 
 # ── backtest core (shared by backtest + workflow) ─────────────────────────────
@@ -664,7 +767,10 @@ def _run_workflow_sync(jid: str, req: dict) -> None:
 
 
 async def launch_workflow(jid: str, req: dict) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_workflow_sync, jid, req)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_workflow", jid, req)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_workflow_sync, jid, req)
 
 
 # ── train loop (screen → backtest → tune) ────────────────────────────────────
@@ -746,7 +852,10 @@ def _run_train_loop_sync(jid: str, req: dict) -> None:
 
 
 async def launch_train_loop(jid: str, req: dict) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_train_loop_sync, jid, req)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_train_loop", jid, req)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_train_loop_sync, jid, req)
 
 
 # ── auto-tune (train → analyse → diagnose → adjust → retrain) ───────────────
@@ -795,7 +904,10 @@ def _run_auto_tune_sync(jid: str, req: dict) -> None:
 
 
 async def launch_auto_tune(jid: str, req: dict) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_auto_tune_sync, jid, req)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_auto_tune", jid, req)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_auto_tune_sync, jid, req)
 
 
 # ── advisor: train ────────────────────────────────────────────────────────────
@@ -825,7 +937,10 @@ def _run_train_sync(jid: str, symbol: str, force: bool) -> None:
 
 
 async def launch_train(jid: str, symbol: str, force: bool = False) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_train_sync, jid, symbol, force)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_train", jid, symbol, force)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_train_sync, jid, symbol, force)
 
 
 # ── advisor: analyze ──────────────────────────────────────────────────────────
@@ -844,7 +959,10 @@ def _run_analyze_sync(jid: str, symbol: str, force_retrain: bool) -> None:
 
 
 async def launch_analyze(jid: str, symbol: str, force_retrain: bool = False) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_analyze_sync, jid, symbol, force_retrain)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_analyze", jid, symbol, force_retrain)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_analyze_sync, jid, symbol, force_retrain)
 
 
 # ── advisor: recommend ────────────────────────────────────────────────────────
@@ -863,7 +981,10 @@ def _run_recommend_sync(jid: str, sector: str | None, top_n: int) -> None:
 
 
 async def launch_recommend(jid: str, sector: str | None = None, top_n: int = 10) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_recommend_sync, jid, sector, top_n)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_recommend", jid, sector, top_n)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_recommend_sync, jid, sector, top_n)
 
 
 # ── Walk-Forward Validation ───────────────────────────────────────────────────
@@ -965,7 +1086,10 @@ def _run_walk_forward_sync(jid: str, req: dict) -> None:
 
 
 async def launch_walk_forward(jid: str, req: dict) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_walk_forward_sync, jid, req)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_walk_forward", jid, req)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_walk_forward_sync, jid, req)
 
 
 # ── Monte Carlo Simulation ───────────────────────────────────────────────────
@@ -1045,7 +1169,10 @@ def _run_monte_carlo_sync(jid: str, req: dict) -> None:
 
 
 async def launch_monte_carlo(jid: str, req: dict) -> None:
-    asyncio.get_running_loop().run_in_executor(_executor, _run_monte_carlo_sync, jid, req)
+    if _QUEUE_MODE == "arq":
+        await _enqueue("run_monte_carlo", jid, req)
+    else:
+        asyncio.get_running_loop().run_in_executor(_executor, _run_monte_carlo_sync, jid, req)
 
 
 # ── Helper utilities ──────────────────────────────────────────────────────────

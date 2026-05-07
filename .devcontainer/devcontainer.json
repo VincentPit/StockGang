@@ -1,0 +1,39 @@
+{
+  "name": "MyQuant",
+  "dockerComposeFile": ["../docker-compose.yml"],
+  "service": "api",
+  "workspaceFolder": "/app",
+
+  // Bring up the deps the API needs alongside the dev container so the
+  // FastAPI server in this container can talk to Postgres + Redis.
+  "runServices": ["api", "db", "redis", "migrate"],
+
+  // Keep the container up between rebuilds; avoids re-installing deps every
+  // time you reopen the workspace.
+  "shutdownAction": "stopCompose",
+
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
+    "ghcr.io/devcontainers/features/git:1":  {}
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "[python]": { "editor.formatOnSave": true, "editor.defaultFormatter": "charliermarsh.ruff" }
+      }
+    }
+  },
+
+  "postCreateCommand": "pip install --quiet --user mypy ruff pip-audit bandit && cd web && npm ci",
+  "remoteUser": "app"
+}

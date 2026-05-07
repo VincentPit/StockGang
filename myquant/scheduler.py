@@ -24,19 +24,28 @@ This module is the brain that makes MyQuant self-improving:
 
 Architecture
 ────────────
-  APScheduler (AsyncIOScheduler) runs inside the FastAPI process.
-  Jobs are lightweight — heavy work (backtest, train) runs in ThreadPoolExecutor.
-  All state is persisted in SQLite so restarts don't lose track.
+  Since T1c, this module is hosted by the dedicated ``scheduler`` container
+  (entrypoint: ``myquant.scheduler_main``) which holds a Redis leader lock
+  so multiple replicas never double-fire. Heavy work runs in this process'
+  ThreadPoolExecutor; that's safe because there is exactly one elected
+  leader at a time.
+
+  All state is persisted in Postgres (jobs table + scheduler_state.json)
+  so restarts don't lose track.
+
+  Follow-up (T1c-3, deferred): once PipelineState is moved to Postgres,
+  the leader can enqueue Arq jobs for the heavy steps so the scheduler
+  container becomes purely a cron dispatcher.
 
 Usage
 ─────
-  # As part of FastAPI (normal mode — wired in api/main.py lifespan)
+  # As part of FastAPI (legacy in-API mode — only when SCHEDULER_IN_API=true)
   from myquant.scheduler import scheduler_manager
   await scheduler_manager.start()    # on startup
   await scheduler_manager.shutdown() # on shutdown
 
-  # Standalone CLI
-  python -m myquant.scheduler
+  # Standalone — production path (T1c)
+  python -m myquant.scheduler_main
 """
 from __future__ import annotations
 

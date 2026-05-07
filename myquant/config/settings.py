@@ -35,6 +35,11 @@ class Settings:
     REDIS_PORT: int = int(_get("REDIS_PORT", "6379"))
     REDIS_DB: int = int(_get("REDIS_DB", "0"))
 
+    # ── Job queue ─────────────────────────────────────────────
+    # "threadpool" = legacy in-process ThreadPoolExecutor (default during cutover)
+    # "arq"        = Redis-backed Arq workers running in a separate process (T1b)
+    MYQUANT_QUEUE: str = _get("MYQUANT_QUEUE", "threadpool").lower()
+
     # ── PostgreSQL ────────────────────────────────────────────
     POSTGRES_HOST: str = _get("POSTGRES_HOST", "localhost")
     POSTGRES_PORT: int = int(_get("POSTGRES_PORT", "5432"))
@@ -55,6 +60,14 @@ class Settings:
         """Sync DSN — used by Alembic and the api/db.py compatibility shim."""
         return (
             f"postgresql+psycopg2://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
+
+    @property
+    def POSTGRES_DSN_RAW(self) -> str:
+        """Driver-less DSN for asyncpg.connect (LISTEN/NOTIFY listener)."""
+        return (
+            f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 

@@ -28,10 +28,15 @@ from .engine import async_engine, sync_engine
 from .models import Base, Cache, Job, PaperAccount, PaperPosition, TrainedModel
 from .session import AsyncSessionLocal, SessionLocal
 
+#: Postgres NOTIFY channel that carries job-id payloads after every job upsert.
+#: WebSocket clients LISTEN here for live progress without polling.
+JOB_NOTIFY_CHANNEL = "myquant_jobs"
+
 __all__ = [
     "Base",
     "Cache",
     "Job",
+    "JOB_NOTIFY_CHANNEL",
     "PaperAccount",
     "PaperPosition",
     "TrainedModel",

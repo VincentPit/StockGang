@@ -1,150 +1,131 @@
 # MyQuant — A-Share Quantitative Trading Platform
 
-A full-stack quantitative trading system for Shanghai & Shenzhen A-share markets. Combines a multi-strategy backtesting engine, LightGBM ML signals, live data fetching, and a paper-trading simulator — all wired up to a modern Next.js dashboard.
+An institutional-grade quantitative trading system for Shanghai & Shenzhen A-share markets. Combines a multi-strategy backtester, LightGBM ML signals, walk-forward validation, Monte Carlo robustness analysis, an autonomous parameter-tuning loop, and a cron scheduler — all wired up to a modern Next.js dashboard.
 
 ---
 
-## Screenshots
+## What's in the box
 
-| Find Stocks | AI Signals | Research |
-|---|---|---|
-| Screener with causal trace | Recommendations & order form | Price chart + fundamentals |
+### Discovery & analysis
+- **Stock Screener** — parallel scan of CSI 300 / CSI 300+500 universe ranked on five factors (trend strength, ATR adequacy, autocorrelation, 6-month momentum, max-drawdown penalty). Each result ships with a **causal trace** showing the factor breakdown and gate-check pass/fail.
+- **AI Advisor** — per-symbol LightGBM classifier on ~1y of OHLCV-derived features. Returns BUY/HOLD/SELL with class probabilities and feature importance. Recommendations rank a curated 33-stock universe across 9 sectors using fundamentals × momentum × ML composite.
+- **Research Panel** — OHLCV chart (90d/180d/1y/2y), fundamentals (P/E, P/B, ROE, growth, margin, dividend, composite scores), stock & macro news headlines, market regime badge (RISK_ON / NEUTRAL / RISK_OFF) with signal multiplier.
 
----
+### Backtesting & validation
+- **Backtester** — event-driven replay with a 5-strategy ensemble (LightGBM, MA crossover, RSI filter, MACD, news sentiment). Realistic cost model: 0.03% commission + stamp duty + slippage. Per-position stop-loss and per-symbol cumulative loss caps.
+- **Walk-Forward** — rolling out-of-sample validation across N folds. Reports per-fold Sharpe / return / drawdown plus a consistency score so you can spot strategies that only work in-sample.
+- **Monte Carlo** — bootstrap-resamples the trade log to produce a distribution of equity curves, percentile bands, VaR/CVaR, and probability-of-loss.
+- **Workflow Pipeline** — one-click screen → backtest with live status (Queued → Screening → Backtesting → Done).
 
-## Feature Overview
+### Autonomous loops
+- **Train Loop** — screen → backtest → adjust → retrain in a closed feedback cycle, persisting trial history and best-params.
+- **Auto-Tune** — autonomous parameter tuner that diagnoses each iteration's weaknesses (overtrading, drawdown, low Sharpe, etc.) and proposes targeted adjustments. Records reasoning per iteration.
+- **Scheduler** — APScheduler-backed cron jobs for nightly screening, daily model retrains, and weekly walk-forward refreshes. State persisted to disk so restarts don't drop schedules.
 
-### 🔍 Stock Screener
-- Scans CSI 300 or CSI 300+500 universe (configurable)
-- Ranks stocks on 5 quantitative signals: trend strength, ATR adequacy, autocorrelation, 6-month momentum, max-drawdown penalty
-- Every result ships with a **causal trace** — a factor breakdown showing exactly why a stock scored the way it did, with gate-check pass/fail badges
-
-### 🤖 AI Signals (Advisor)
-- **Stock Analyzer** — trains a LightGBM classifier per symbol on ~1 year of daily OHLCV features; returns BUY/HOLD/SELL signal + class probabilities + feature importance
-- **Recommendations** — scores the full curated universe (33 A-share leaders across 9 sectors) using fundamentals × momentum × ML signal composite; each pick includes a causal trace
-- **Stored Models** — view, manage, and delete per-symbol trained models; staleness rules prevent unnecessary retraining (30-day calendar / 5-bar minimum thresholds)
-
-### 📈 Research Panel
-- OHLCV price chart (90d / 180d / 1yr / 2yr)
-- Fundamentals card: P/E, P/B, ROE, revenue growth, net margin, dividend yield, composite value/growth/quality scores
-- Stock news headlines (30-minute cache)
-- Macro news feed
-- Market regime badge (RISK_ON / NEUTRAL / RISK_OFF) with signal multiplier
-
-### 📊 Backtester
-- Event-driven replay of historical bars
-- 5-strategy ensemble: LightGBM, MA Crossover, RSI Filter, MACD, News Sentiment
-- Realistic cost model: 0.03% commission + stamp duty + slippage
-- Stop-loss per position (-8%) and per-symbol cumulative loss cap
-- Output: total return, Sharpe, max drawdown, win rate, NAV chart, per-symbol P&L, full trade log
-
-### ⚡ Workflow Pipeline
-- Single-click screen → backtest: runs the screener to find top-N stocks, then immediately backtests them
-- Configurable: universe index, screener lookback, top-N, backtest window, initial cash
-- Live status bar: Queued → Screening → Backtesting → Done
-
-### 💼 Paper Trading
-- Full order book: BUY / SELL, MARKET / LIMIT, review-then-confirm flow
-- Live position tracking with avg cost, current price, unrealised P&L %
-- Persistent across server restarts (SQLite)
-- Reset to ¥500,000 anytime
-- Available inline from screener results, recommendation cards, and the analyzer
+### Execution & risk
+- **Paper trading** — full order book (BUY/SELL, MARKET/LIMIT, review-then-confirm), live position tracking with avg cost / unrealised P&L, persistent across restarts, reset-to-¥500k anytime. Available inline from the screener, recommendation cards, and analyzer.
+- **RiskGate** — every signal passes through 7 layers before reaching the broker: market state, throttle, daily-drawdown circuit breaker (−3%), position limit (20% NAV), sector exposure (40% NAV), 1-day 95% VaR (<2% NAV), per-symbol cooldown.
+- **Analytics** — fund-grade performance metrics (Sharpe, Sortino, Calmar, rolling stats, tail risk, monthly/yearly heatmaps) and factor attribution.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Next.js 14 (web/)                  │
-│  ScreenerPanel · AdvisorPanel · ResearchPanel        │
-│  BacktestPanel · WorkflowPanel · AccountWidget       │
-│  CausalTracePanel · PriceChart · NavChart …          │
-└────────────────────┬────────────────────────────────┘
-                     │ HTTP / WebSocket
-┌────────────────────▼────────────────────────────────┐
-│               FastAPI  (api/)                        │
-│  main.py · schemas.py · advisor.py                   │
-│  runner.py (thread pool) · db.py (SQLite)            │
-└────────────────────┬────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────┐
-│              myquant/  (core library)                │
-│                                                      │
-│  backtest/simulator.py    — event-driven engine      │
-│  strategy/ml/             — LightGBM feature eng.    │
-│  strategy/technical/      — MA, RSI, MACD            │
-│  strategy/nlp/            — news sentiment           │
-│  risk/risk_gate.py        — 7-layer signal filter    │
-│  portfolio/               — NAV & position tracking  │
-│  execution/brokers/       — PaperBroker              │
-│  data/fetchers/           — yfinance, AKShare,       │
-│                             fundamentals, news       │
-│  tools/stock_screener.py  — parallel universe scan   │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                        Next.js 14 (web/)                          │
+│  Screener · Advisor · Backtest · Workflow · TrainLoop             │
+│  AutoTune · WalkForward · MonteCarlo · Scheduler · Account        │
+└─────────────────────────┬────────────────────────────────────────┘
+                          │ HTTP / WebSocket
+┌─────────────────────────▼────────────────────────────────────────┐
+│                       FastAPI (api/)                              │
+│  main.py — routes, rate limit, security headers, CORS, lifespan   │
+│  runner.py — thread-pool job launcher (jobs survive restarts)     │
+│  advisor.py — LightGBM train / analyze / recommend                │
+│  auto_tune.py — diagnose-and-adjust autonomous loop               │
+│  scheduler_routes.py — cron job CRUD                              │
+│  schemas.py — Pydantic v2 request/response models                 │
+│  db.py — SQLite persistence (jobs, cache, models, broker)         │
+└─────────────────────────┬────────────────────────────────────────┘
+                          │
+┌─────────────────────────▼────────────────────────────────────────┐
+│                    myquant/  (core library)                       │
+│                                                                   │
+│  backtest/        simulator.py, walk_forward.py                   │
+│  strategy/        alpha_model, regime, macro_filter, sizing,      │
+│                   technical (MA/RSI/MACD), nlp/news_strategy      │
+│  risk/            risk_gate (7 layers), advanced_risk             │
+│  analytics/       performance.py, attribution.py                  │
+│  portfolio/       portfolio_engine, optimizer                     │
+│  execution/       order_manager, algorithms, brokers/PaperBroker  │
+│  data/fetchers/   yfinance, AKShare, fundamentals, news, regime   │
+│  monitoring/      Streamlit dashboard, alerts                     │
+│  scheduler.py     APScheduler manager (cron-driven jobs)          │
+│  tools/           parallel universe screener with causal trace    │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-**Background jobs** — every expensive operation (backtest, screener, ML training, recommendations) runs in a `ThreadPoolExecutor` thread. The API returns a `job_id` immediately; the frontend polls until `status == "done"`. Jobs survive server restarts via SQLite write-through.
+**Background jobs.** Every expensive operation (backtest, screener, training, auto-tune, walk-forward, Monte Carlo) runs on a `ThreadPoolExecutor`. The API returns a `job_id` immediately; the frontend polls or subscribes via WebSocket. Job state is written through to SQLite so it survives restarts.
 
-**Two-level cache** — all external data fetches (price, fundamentals, news, regime) are cached in memory (L1) and SQLite (L2) with per-type TTLs (4h price · 24h fundamentals · 30m news). L1 is consulted first with zero I/O.
+**Two-level cache.** External data fetches (price, fundamentals, news, regime) are cached in memory (L1) and SQLite (L2) with per-type TTLs (4h price · 24h fundamentals · 30m news). L1 is consulted first with zero I/O.
+
+**Causal trace.** Every screener result and recommendation includes a serialised factor breakdown — score components, gate checks, and the final decision path — so the dashboard can render *why* a stock was picked, not just *that* it was.
 
 ---
 
-## Tech Stack
+## Tech stack
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 14, React 18, TypeScript, Tailwind CSS, Recharts, Lucide |
-| Backend | FastAPI, Pydantic v2, Uvicorn (ASGI) |
-| ML | LightGBM, scikit-learn |
+| Frontend | Next.js 14, React 18, TypeScript 5, Tailwind, Recharts, Lucide |
+| Backend | FastAPI, Pydantic v2, Uvicorn (ASGI), APScheduler |
+| ML | LightGBM, scikit-learn, scipy |
 | NLP | SnowNLP (Chinese sentiment), jieba |
-| Data | yfinance, AKShare, tushare |
-| Persistence | SQLite (jobs, models, cache, paper broker) |
-| Testing | pytest (307 tests), Jest + Testing Library (67 tests) |
+| Data sources | yfinance, AKShare, tushare |
+| Persistence (dev) | SQLite (jobs, models, cache, paper broker) |
+| Persistence (Docker) | TimescaleDB (PostgreSQL 16) + Redis 7 |
+| Monitoring | Grafana, Streamlit |
+| Browser automation | Playwright (WebBroker) |
+| Testing | pytest, ruff, tsc |
 
 ---
 
-## Quick Start (local)
+## Quick start (local)
 
 ### Prerequisites
 - Python 3.11+
 - Node.js 18+
 
-### 1 — Clone & install
+### Install
 
 ```bash
-git clone https://github.com/VincentPit/StockGang.git
-cd StockGang
-
 # Python backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Next.js frontend (run from web/ subdirectory)
+# Next.js frontend
 cd web && npm install && cd ..
 ```
 
-### 2 — Configure
+### Configure
 
 ```bash
 cp .env.example .env
-# .env ships with safe defaults for local dev — no changes needed to just run it
+# .env ships with safe defaults — no edits needed for local dev
 ```
 
-### 3 — Run (one command)
+### Run
 
 ```bash
-lsof -ti:8000 | xargs kill -9 2>/dev/null; \
-source .venv/bin/activate && \
+lsof -ti:8000 | xargs kill -9 2>/dev/null
+source .venv/bin/activate
 (uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload &) && \
-cd web && npm run dev
+  cd web && npm run dev
 ```
 
-Open **http://localhost:3000**
-
-- API runs at **http://localhost:8000**
-- Interactive API docs at **http://localhost:8000/docs**
+Open **http://localhost:3000** — API at **http://localhost:8000** — interactive docs at **http://localhost:8000/docs**.
 
 ---
 
@@ -155,125 +136,114 @@ cp .env.example .env
 docker compose up --build
 ```
 
-| Service | URL |
-|---|---|
-| Next.js frontend | http://localhost:3000 |
-| FastAPI backend | http://localhost:8000 |
-| Grafana dashboards | http://localhost:3001 |
-| Streamlit monitor | http://localhost:8501 |
+| Service | Port | Role |
+|---|---|---|
+| `web` (Next.js) | 3000 | Dashboard |
+| `api` (FastAPI) | 8000 | Backend + scheduler |
+| `db` (TimescaleDB) | 5432 | Time-series storage |
+| `redis` | 6379 | Cache & queue backbone |
+| `grafana` | 3001 | Monitoring dashboards |
+| `dashboard` (Streamlit) | 8501 | Live engine monitor |
+| `engine` | — | Trading engine (paper mode, background) |
+
+Default Grafana login: `admin` / `myquant123`.
 
 ---
 
-## Running Tests
+## Tests & CI
 
 ```bash
-# Python (307 tests)
+# Python (~530 tests)
 pytest tests/ -q
 
-# Frontend (67 tests)
-cd web && npm test
+# Lint
+ruff check api/ tests/
+
+# Frontend type-check
+cd web && npx tsc --noEmit
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs pytest, ruff, `tsc --noEmit`, and a Docker build smoke test on every push to `main`/`develop` and PRs into `main`. The web Jest config currently runs with `--passWithNoTests`; component-level tests are a known gap.
 
 ---
 
-## Project Structure
-
-```
-MyQuant/
-├── api/
-│   ├── main.py          # FastAPI routes + rate limiter + lifespan
-│   ├── schemas.py       # Pydantic request/response models
-│   ├── advisor.py       # LightGBM training, analysis, recommendations
-│   ├── runner.py        # Background job runner (thread pool + job store)
-│   └── db.py            # SQLite persistence (jobs, cache, models, broker)
-│
-├── myquant/
-│   ├── backtest/
-│   │   └── simulator.py         # Event-driven backtesting engine
-│   ├── strategy/
-│   │   ├── ml/
-│   │   │   ├── lgbm_strategy.py       # LightGBM signal strategy
-│   │   │   └── feature_engineer.py    # 22 OHLCV-derived features
-│   │   ├── technical/
-│   │   │   ├── ma_crossover.py
-│   │   │   ├── rsi_strategy.py
-│   │   │   └── macd_strategy.py
-│   │   ├── nlp/
-│   │   │   └── news_strategy.py       # SnowNLP sentiment
-│   │   ├── risk_gate.py  → risk/
-│   │   └── sizing.py                  # ATR position sizing
-│   ├── risk/
-│   │   └── risk_gate.py     # 7-layer signal filter (drawdown, VaR, sector, …)
-│   ├── data/fetchers/
-│   │   ├── historical_loader.py   # yfinance OHLCV + symbol mapping
-│   │   ├── universe_fetcher.py    # CSI 300 / CSI 500 constituents (AKShare)
-│   │   ├── fundamental_fetcher.py # P/E, P/B, ROE, composite scores
-│   │   ├── news_fetcher.py        # Stock & macro headlines
-│   │   └── macro_proxy.py         # Regime detection (RISK_ON/OFF)
-│   ├── execution/brokers/
-│   │   └── paper_broker.py        # Paper trading with cost model
-│   ├── portfolio/
-│   │   └── portfolio_engine.py    # NAV, drawdown, Sharpe tracking
-│   └── tools/
-│       └── stock_screener.py      # Parallel universe scanner + causal trace
-│
-├── web/
-│   ├── app/
-│   │   ├── page.tsx         # App shell (tabs, account widget)
-│   │   └── layout.tsx
-│   ├── components/
-│   │   ├── ScreenerPanel.tsx
-│   │   ├── AdvisorPanel.tsx
-│   │   ├── ResearchPanel.tsx
-│   │   ├── BacktestPanel.tsx
-│   │   ├── WorkflowPanel.tsx
-│   │   ├── CausalTracePanel.tsx   # Factor attribution visualiser
-│   │   ├── AccountWidget.tsx
-│   │   ├── PriceChart.tsx
-│   │   ├── NavChart.tsx
-│   │   └── …
-│   └── lib/
-│       ├── api.ts              # Typed API client
-│       ├── account-context.tsx # Global account polling (30s interval)
-│       └── nav-context.tsx     # Tab routing + cross-panel symbol jump
-│
-├── tests/                  # 307 pytest tests
-├── docker-compose.yml
-├── requirements.txt
-└── .env.example
-```
-
----
-
-## API Reference (key endpoints)
+## API reference (key endpoints)
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/screen` | Launch screener job |
-| `GET` | `/api/screen/{id}` | Poll screener results |
-| `POST` | `/api/backtest` | Launch backtest job |
-| `GET` | `/api/backtest/{id}` | Poll backtest results |
-| `POST` | `/api/workflow` | Launch screen→backtest pipeline |
-| `GET` | `/api/workflow/{id}` | Poll workflow results |
-| `POST` | `/api/advisor/analyze` | Launch full stock analysis |
-| `GET` | `/api/advisor/recommend` | Get ranked recommendations (all sectors) |
-| `GET` | `/api/advisor/recommend/{sector}` | Filter by sector |
+| `POST` / `GET` | `/api/screen[/{id}]` | Universe screener |
+| `POST` / `GET` | `/api/backtest[/{id}]` | Single backtest |
+| `GET` | `/api/backtest/{id}/nav` | NAV time-series for charting |
+| `POST` / `GET` | `/api/workflow[/{id}]` | Screen → backtest pipeline |
+| `POST` / `GET` | `/api/train-loop[/{id}]` | Closed-loop training cycle |
+| `POST` / `GET` | `/api/auto-tune[/{id}]` | Autonomous parameter tuner |
+| `POST` / `GET` | `/api/walk-forward[/{id}]` | Rolling out-of-sample validation |
+| `POST` / `GET` | `/api/monte-carlo[/{id}]` | Bootstrap robustness analysis |
+| `POST` / `GET` | `/api/advisor/train[/{id}]` | Per-symbol LightGBM training |
+| `POST` / `GET` | `/api/advisor/analyze[/{id}]` | Full stock analysis |
+| `GET` | `/api/advisor/recommend[/{sector}]` | Ranked picks (optionally per-sector) |
+| `GET` / `DELETE` | `/api/advisor/models[/{symbol}]` | Stored model registry |
 | `GET` | `/api/price/{symbol}` | OHLCV bars |
 | `GET` | `/api/fundamentals/{symbol}` | P/E, P/B, ROE, composite scores |
-| `GET` | `/api/news/{symbol}` | Stock news headlines |
+| `GET` | `/api/news/{symbol}` · `/api/news/macro` | Headlines |
 | `GET` | `/api/regime` | Market regime + signal multiplier |
-| `POST` | `/api/orders` | Submit paper order |
-| `GET` | `/api/account` | Account cash + live positions |
-| `DELETE` | `/api/account/reset` | Reset simulator to ¥500,000 |
+| `GET` | `/api/universe` | Candidate symbol list |
+| `*` | `/api/scheduler/*` | Cron job CRUD |
+| `POST` / `GET` / `DELETE` | `/api/orders` · `/api/account[/reset]` | Paper trading |
 | `WS` | `/api/ws/{job_id}` | Live job progress stream |
+| `GET` | `/api/health` | Liveness + uptime |
 
 Full interactive docs: **http://localhost:8000/docs**
 
 ---
 
-## Curated Universe (33 stocks across 9 sectors)
+## Project layout
 
-| Sector | Key stocks |
+```
+MyQuant/
+├── api/
+│   ├── main.py             # FastAPI app — routes, middleware, lifespan
+│   ├── runner.py           # Thread-pool job launcher
+│   ├── advisor.py          # LightGBM train / analyze / recommend
+│   ├── auto_tune.py        # Autonomous diagnose-and-adjust loop
+│   ├── scheduler_routes.py # Cron job CRUD endpoints
+│   ├── schemas.py          # Pydantic v2 models
+│   └── db.py               # SQLite persistence
+│
+├── myquant/
+│   ├── backtest/           # simulator.py, walk_forward.py
+│   ├── strategy/           # alpha_model, regime, macro_filter, sizing, …
+│   ├── risk/               # risk_gate.py, advanced_risk.py
+│   ├── analytics/          # performance.py, attribution.py
+│   ├── portfolio/          # portfolio_engine.py, optimizer.py
+│   ├── execution/          # order_manager, algorithms, brokers/
+│   ├── data/               # fetchers/, store/
+│   ├── monitoring/         # Streamlit dashboard, alerts
+│   ├── engine/             # trading_engine.py
+│   ├── tools/              # stock_screener.py
+│   └── scheduler.py        # APScheduler manager
+│
+├── web/
+│   ├── app/                # advisor, screener, backtest, workflow,
+│   │                       # trainloop, autotune, walkforward,
+│   │                       # montecarlo, scheduler
+│   ├── components/         # Panels (one per feature) + shared widgets
+│   └── lib/                # API client, account & nav contexts
+│
+├── tests/                  # pytest suite
+├── infra/grafana/          # Datasource + dashboard provisioning
+├── scripts/                # setup_local.sh
+├── data/                   # SQLite, model versions, cache, scheduler state
+├── docker-compose.yml      # Full stack (db, redis, api, web, engine, …)
+├── Dockerfile              # Shared Python image
+└── .github/workflows/ci.yml
+```
+
+---
+
+## Curated universe (33 stocks across 9 sectors)
+
+| Sector | Stocks |
 |---|---|
 | Finance | 招商银行, 中国平安, 工商银行, 兴业银行, 平安银行, 东方财富 |
 | Consumer | 贵州茅台, 五粮液, 美的集团, 伊利股份, 中国中免, 泸州老窖, 正大食品, 海天味业 |
@@ -283,20 +253,6 @@ Full interactive docs: **http://localhost:8000/docs**
 | Materials | 紫金矿业, 隆基绿能, 海螺水泥 |
 | Industrial | 三一重工 |
 | Transport | 上海机场, 顺丰控股 |
-
----
-
-## Risk Controls
-
-The `RiskGate` checks every signal through 7 layers before execution reaches the broker:
-
-1. **Market state** — no trading during halt / auction / off-hours
-2. **Throttle** — max orders per minute (configurable)
-3. **Daily drawdown circuit breaker** — halts all trading if daily P&L < −3%
-4. **Position limit** — max 20% NAV in any single symbol
-5. **Sector exposure** — max 40% NAV in any single sector
-6. **VaR check** — 1-day 95% VaR must stay under 2% NAV
-7. **Cooldown timer** — prevents repeated trades on same symbol within N seconds
 
 ---
 

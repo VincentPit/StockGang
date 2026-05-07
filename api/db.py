@@ -38,6 +38,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from myquant.db import (
+    JOB_NOTIFY_CHANNEL,
     Cache,
     Job,
     PaperAccount,
@@ -79,7 +80,12 @@ def init_db() -> None:
 # ── Jobs API ──────────────────────────────────────────────────────────────────
 
 def upsert_job(job: dict) -> None:
-    """Insert or update a job. Preserves created_at on UPDATE."""
+    """Insert or update a job, then NOTIFY listeners.
+
+    The pg_notify call runs in the same transaction as the upsert, so a
+    listener observing the channel is guaranteed to see committed state
+    when it fetches the job. ``created_at`` is preserved on UPDATE.
+    """
     now = time.time()
     payload = json.dumps(job, default=str)
     stmt = (
@@ -103,6 +109,10 @@ def upsert_job(job: dict) -> None:
     )
     with SessionLocal() as s, s.begin():
         s.execute(stmt)
+        s.execute(
+            text("SELECT pg_notify(:ch, :jid)"),
+            {"ch": JOB_NOTIFY_CHANNEL, "jid": job["id"]},
+        )
 
 
 def fetch_job(jid: str) -> dict | None:
@@ -130,6 +140,18 @@ def jobs_stats() -> dict:
 
 # ── Cache API ─────────────────────────────────────────────────────────────────
 
+def _record_cache(tier: str | None) -> None:
+    """Bump cache-hit/miss counters; no-op if observability deps are missing."""
+    try:
+        from myquant.observability.metrics import CACHE_HITS_TOTAL, CACHE_MISSES_TOTAL
+    except Exception:
+        return
+    if tier:
+        CACHE_HITS_TOTAL.labels(tier=tier).inc()
+    else:
+        CACHE_MISSES_TOTAL.inc()
+
+
 def cache_get(key: str) -> Any | None:
     """Return the cached value, or None if missing / expired.
 
@@ -144,6 +166,7 @@ def cache_get(key: str) -> Any | None:
     if entry is not None:
         value, expires_at = entry
         if expires_at > now:
+            _record_cache("l1")
             return value
 
     # L2 — Postgres
@@ -154,12 +177,14 @@ def cache_get(key: str) -> Any | None:
             )
         ).one_or_none()
     if row is None:
+        _record_cache(None)
         return None
 
     data, expires_at = row
     decoded = json.loads(data)
     with _wlock:
         _mem[key] = (decoded, expires_at)
+    _record_cache("l2")
     return decoded
 
 

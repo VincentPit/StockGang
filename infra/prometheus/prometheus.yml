@@ -1,0 +1,27 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # FastAPI HTTP + framework metrics
+  - job_name: myquant-api
+    metrics_path: /api/metrics
+    static_configs:
+      - targets: ["api:8000"]
+
+  # Custom myquant_* metrics from the same API process
+  - job_name: myquant-api-custom
+    metrics_path: /api/metrics/myquant
+    static_configs:
+      - targets: ["api:8000"]
+
+  # Arq worker custom metrics
+  - job_name: myquant-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["worker:9101"]
+
+  # Prometheus self-scrape (sanity)
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

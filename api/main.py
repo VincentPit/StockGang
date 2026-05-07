@@ -51,11 +51,31 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 
 # ── Structured logging ────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s %(levelname)-8s %(name)-30s %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
+# JSON logs by default (LOG_FORMAT=json) so Promtail/Loki can index fields
+# directly. Set LOG_FORMAT=text for the readable single-line format used in
+# local dev or when stdout is a TTY.
+_log_level   = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+_log_format  = os.getenv("LOG_FORMAT", "json").lower()
+_log_handler = logging.StreamHandler()
+if _log_format == "json":
+    try:
+        from pythonjsonlogger.jsonlogger import JsonFormatter
+        _log_handler.setFormatter(JsonFormatter(
+            "%(asctime)s %(levelname)s %(name)s %(message)s",
+            rename_fields={"asctime": "ts", "levelname": "level", "name": "logger"},
+        ))
+    except Exception:
+        # Fall back to text if python-json-logger isn't installed
+        _log_handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)-30s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        ))
+else:
+    _log_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(name)-30s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    ))
+logging.basicConfig(level=_log_level, handlers=[_log_handler], force=True)
 _log = logging.getLogger(__name__)
 
 _VERSION = "1.0.0"  # single source of truth — consumed by FastAPI() and /api/health
@@ -230,27 +250,42 @@ async def _lifespan(app: FastAPI):
     if deleted:
         _log.info("Pruned %d expired cache rows on startup", deleted)
 
-    # ── Start the auto-update scheduler ───────────────────────────────────
+    # ── Start the auto-update scheduler (legacy in-API mode) ──────────────
+    # Since T1c, the scheduler runs in its own container (myquant.scheduler_main)
+    # with a Redis leader lock. Set SCHEDULER_IN_API=true to fall back to the
+    # old behaviour for local dev where you don't want to run the extra container.
+    _scheduler_in_api = os.getenv("SCHEDULER_IN_API", "false").lower() in ("1", "true", "yes")
     _scheduler_enabled = os.getenv("SCHEDULER_ENABLED", "true").lower() in ("1", "true", "yes")
-    if _scheduler_enabled:
+    if _scheduler_enabled and _scheduler_in_api:
         try:
             from myquant.scheduler import scheduler_manager
             await scheduler_manager.start()
-            _log.info("Auto-update scheduler started")
+            _log.info("Auto-update scheduler started in-API (SCHEDULER_IN_API=true)")
         except Exception as exc:
             _log.warning("Scheduler failed to start (non-fatal): %s", exc)
-    else:
+    elif not _scheduler_enabled:
         _log.info("Scheduler disabled via SCHEDULER_ENABLED=false")
+    else:
+        _log.info("Scheduler runs in dedicated container — see myquant.scheduler_main")
 
     _log.info("MyQuant API started")
     yield
 
-    # ── Shutdown scheduler ────────────────────────────────────────────────
+    # ── Shutdown scheduler (only if started in-API) ───────────────────────
+    if _scheduler_enabled and _scheduler_in_api:
+        try:
+            from myquant.scheduler import scheduler_manager
+            await scheduler_manager.shutdown()
+        except Exception:
+            pass
+
+    # ── Close the Postgres LISTEN connection ──────────────────────────────
     try:
-        from myquant.scheduler import scheduler_manager
-        await scheduler_manager.shutdown()
+        from myquant.db.notify import job_notifier
+        await job_notifier.close()
     except Exception:
         pass
+
     _log.info("MyQuant API shutting down")
 
 
@@ -270,9 +305,41 @@ app = FastAPI(
     lifespan=_lifespan,
 )
 
+# ── OpenTelemetry tracing (T2c) ───────────────────────────────────────────────
+try:
+    from myquant.observability.tracing import setup_tracing
+    setup_tracing(app, service_name="myquant-api")
+except Exception as _exc:  # pragma: no cover — observability optional
+    _log.warning("OTel setup skipped: %s", _exc)
+
 # ── Register sub-routers ──────────────────────────────────────────────────────
 from api.scheduler_routes import router as _scheduler_router  # noqa: E402
 app.include_router(_scheduler_router)
+
+# ── Prometheus metrics (T2a) ──────────────────────────────────────────────────
+# Exposes /api/metrics with HTTP/route metrics + our custom job/cache/broker
+# counters. The instrumentator is optional so tests and dev envs without the
+# extra dep still boot — failures here are non-fatal.
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    from myquant.observability.metrics import REGISTRY as _MQ_REGISTRY
+
+    _instrumentator = Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=True,
+        excluded_handlers=["/api/metrics", "/api/health"],
+    )
+    _instrumentator.instrument(app)
+    _instrumentator.expose(app, endpoint="/api/metrics", include_in_schema=False)
+
+    # Mount our custom registry alongside the default one so /api/metrics
+    # shows both FastAPI HTTP metrics AND myquant_job_* / cache / broker counters.
+    @app.get("/api/metrics/myquant", include_in_schema=False)
+    async def _myquant_metrics():
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        return Response(content=generate_latest(_MQ_REGISTRY), media_type=CONTENT_TYPE_LATEST)
+except Exception as _exc:  # pragma: no cover — observability is optional
+    _log.warning("Prometheus instrumentation disabled: %s", _exc)
 
 # Middleware order matters: added last = executed first
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -381,8 +448,23 @@ async def jobs():
 
 @app.websocket("/api/ws/{job_id}")
 async def ws_progress(websocket: WebSocket, job_id: str):
-    """Poll job every 500 ms and push status updates until done/error."""
+    """Push job status updates over Postgres LISTEN/NOTIFY until done/error.
+
+    Flow:
+      1. Subscribe to the ``myquant_jobs`` channel for this job_id.
+      2. Send the current snapshot immediately (covers fast jobs that finished
+         before the client connected).
+      3. Wait on the asyncio.Event; whenever ``upsert_job`` issues a NOTIFY for
+         this job, fetch the fresh row and send it.
+      4. Break on terminal state (done/error/not_found) or client disconnect.
+
+    A 30 s wakeup keeps the loop alive (so closed sockets are detected) even
+    if no progress events are arriving — the underlying job is still running.
+    """
+    from myquant.db.notify import job_notifier
+
     await websocket.accept()
+    event = await job_notifier.subscribe(job_id)
     try:
         while True:
             job = get_job(job_id)
@@ -396,21 +478,29 @@ async def ws_progress(websocket: WebSocket, job_id: str):
                 else:
                     await websocket.send_json({"status": "done", "data": _screen_response(job).model_dump()})
                 break
-            elif status == "error":
+            if status == "error":
                 raw_err  = job.get("error") or "unknown error"
                 safe_err = raw_err.splitlines()[-1] if "\n" in raw_err else raw_err
                 await websocket.send_json({"status": "error", "error": safe_err})
                 break
-            else:
-                msg: dict = {"status": status}
-                if job.get("pct") is not None:
-                    msg["pct"] = job["pct"]
-                if job.get("step"):
-                    msg["step"] = job["step"]
-                await websocket.send_json(msg)
-            await asyncio.sleep(0.5)
+            msg: dict = {"status": status}
+            if job.get("pct") is not None:
+                msg["pct"] = job["pct"]
+            if job.get("step"):
+                msg["step"] = job["step"]
+            await websocket.send_json(msg)
+
+            # Wait for the next NOTIFY (or a periodic wakeup so we notice
+            # client disconnects). Reset the Event in either case.
+            try:
+                await asyncio.wait_for(event.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                pass
+            event.clear()
     except WebSocketDisconnect:
         pass
+    finally:
+        job_notifier.unsubscribe(job_id, event)
 
 
 # ── serialiser helpers ────────────────────────────────────────────────────────
@@ -1160,6 +1250,7 @@ async def submit_order(req: OrderRequest):
         limit_price = req.limit_price or 0.0,
     )
 
+    mode = "live" if live else "simulator"
     try:
         broker    = await _get_broker()
         broker_id = await broker.submit_order(order)
@@ -1168,6 +1259,11 @@ async def submit_order(req: OrderRequest):
             "live" if live else "sim",
             req.side, req.symbol, req.quantity, broker_id,
         )
+        try:
+            from myquant.observability.metrics import BROKER_ORDERS_TOTAL
+            BROKER_ORDERS_TOTAL.labels(action=req.side, mode=mode).inc()
+        except Exception:
+            pass
 
         cash_after: float | None = None
         if not live:
@@ -1188,6 +1284,11 @@ async def submit_order(req: OrderRequest):
 
     except Exception as exc:
         _log.exception("Broker order failed: %s", exc)
+        try:
+            from myquant.observability.metrics import BROKER_ORDER_FAILURES_TOTAL
+            BROKER_ORDER_FAILURES_TOTAL.labels(mode=mode).inc()
+        except Exception:
+            pass
         if live:
             global _web_broker
             _web_broker = None

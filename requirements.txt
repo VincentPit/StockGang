@@ -27,6 +27,18 @@ SQLAlchemy[asyncio]>=2.0.0
 asyncpg>=0.29.0          # PostgreSQL async driver
 psycopg2-binary>=2.9.0   # Sync driver — used by Alembic and api/db.py shim
 alembic>=1.13.0          # Schema migrations
+arq>=0.25.0              # Redis-backed async job queue (T1b)
+
+# ── Observability (T2) ────────────────────────────────────────
+prometheus-fastapi-instrumentator>=7.0.0   # /metrics endpoint for FastAPI
+prometheus-client>=0.20.0                  # raw metric primitives + worker /metrics
+python-json-logger>=2.0.7                  # structured JSON logs for Loki
+opentelemetry-api>=1.27.0                  # tracing API (T2c)
+opentelemetry-sdk>=1.27.0                  # tracing SDK
+opentelemetry-exporter-otlp>=1.27.0        # OTLP exporter → Tempo
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-instrumentation-sqlalchemy>=0.48b0
+opentelemetry-instrumentation-redis>=0.48b0
 
 # ── Broker SDKs ───────────────────────────────────────────────
 futu-api>=9.0.0          # Futu OpenAPI (HK/US/A-share)

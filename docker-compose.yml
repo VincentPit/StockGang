@@ -34,6 +34,67 @@ services:
       timeout: 3s
       retries: 5
 
+  # ── Prometheus (T2a) ──────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: myquant_prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheusdata:/prometheus
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Tempo — distributed tracing backend (T2c) ─────────────────────────────
+  tempo:
+    image: grafana/tempo:2.7.0
+    container_name: myquant_tempo
+    restart: unless-stopped
+    command: -config.file=/etc/tempo/tempo-config.yml
+    volumes:
+      - ./infra/tempo/tempo-config.yml:/etc/tempo/tempo-config.yml:ro
+      - tempodata:/var/tempo
+    ports:
+      - "3200:3200"     # Tempo HTTP query
+      - "4317:4317"     # OTLP gRPC ingest
+
+  # ── Loki — log aggregator (T2b) ───────────────────────────────────────────
+  loki:
+    image: grafana/loki:latest
+    container_name: myquant_loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./infra/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - lokidata:/loki
+    ports:
+      - "3100:3100"
+    healthcheck:
+      disable: true
+
+  # ── Promtail — tails docker container stdout, ships to Loki (T2b) ─────────
+  promtail:
+    image: grafana/promtail:latest
+    container_name: myquant_promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./infra/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      loki:
+        condition: service_started
+
   # ── Grafana Dashboard ─────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:latest
@@ -94,6 +155,12 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
   # ── Trading Engine (paper mode) ───────────────────────────────────────────
   engine:
@@ -118,6 +185,67 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./logs:/app/logs
+    healthcheck:
+      disable: true
+
+  # ── Cron scheduler (T1c) ──────────────────────────────────────────────────
+  # Hosts APScheduler for daily data-refresh / retrain / weekly auto-tune.
+  # Holds a Redis leader lock so even accidental scaling does not double-fire.
+  # The API runs with SCHEDULER_IN_API=false — only this container schedules.
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myquant_scheduler
+    restart: unless-stopped
+    command: python -m myquant.scheduler_main
+    environment:
+      REDIS_HOST:    redis
+      POSTGRES_HOST: db
+      LOG_LEVEL:     ${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      disable: true
+
+  # ── Arq job worker (T1b) ──────────────────────────────────────────────────
+  # Consumes Redis-queued jobs (backtest, screener, train, auto-tune, etc.).
+  # Activated when MYQUANT_QUEUE=arq in the API env. Scale horizontally with
+  # `docker compose up --scale worker=N`; jobs are claimed by whichever
+  # worker pops them off the queue.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: arq myquant.workers.worker.WorkerSettings
+    environment:
+      MYQUANT_QUEUE: arq
+      REDIS_HOST:    redis
+      POSTGRES_HOST: db
+      LOG_LEVEL:     ${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      disable: true
 
   # ── FastAPI backend ────────────────────────────────────────────────────────
   api:
@@ -132,6 +260,7 @@ services:
       LOG_LEVEL:          ${LOG_LEVEL:-INFO}
       ALLOWED_ORIGINS:    ${ALLOWED_ORIGINS:-http://localhost:3000}
       SCHEDULER_ENABLED:  ${SCHEDULER_ENABLED:-true}
+      SCHEDULER_IN_API:   "false"
       POSTGRES_HOST:      db
       REDIS_HOST:         redis
     env_file:
@@ -171,8 +300,17 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3000/api/healthz"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
 
 volumes:
   pgdata:
   redisdata:
   grafanadata:
+  prometheusdata:
+  lokidata:
+  tempodata:
