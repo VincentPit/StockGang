@@ -53,6 +53,25 @@ services:
       db:
         condition: service_healthy
 
+  # ── Alembic migrations (one-shot) ─────────────────────────────────────────
+  # Runs `alembic upgrade head` against the db service and exits. api/engine
+  # depend on this completing successfully, so multi-replica deployments
+  # never race the migration.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myquant_migrate
+    command: alembic upgrade head
+    environment:
+      POSTGRES_HOST: db
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
   # ── Streamlit Live Dashboard ──────────────────────────────────────────────
   dashboard:
     build:
@@ -73,6 +92,8 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   # ── Trading Engine (paper mode) ───────────────────────────────────────────
   engine:
@@ -93,9 +114,10 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./logs:/app/logs
-      - ./data:/app/data
 
   # ── FastAPI backend ────────────────────────────────────────────────────────
   api:
@@ -110,10 +132,18 @@ services:
       LOG_LEVEL:          ${LOG_LEVEL:-INFO}
       ALLOWED_ORIGINS:    ${ALLOWED_ORIGINS:-http://localhost:3000}
       SCHEDULER_ENABLED:  ${SCHEDULER_ENABLED:-true}
+      POSTGRES_HOST:      db
+      REDIS_HOST:         redis
     env_file:
       - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
-      - ./data:/app/data
       - ./logs:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]

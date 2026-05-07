@@ -18,26 +18,13 @@ Coverage
 from __future__ import annotations
 
 import pickle
-import threading
 import time
 
 import numpy as np
 import pandas as pd
 import pytest
 
-# ── Isolated DB fixture (reuses same pattern as test_db.py) ──────────────────
-
-@pytest.fixture(autouse=True)
-def _isolated_db(tmp_path, monkeypatch):
-    import api.db as db
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test_advisor.db")
-    monkeypatch.setattr(db, "_local", threading.local())
-    monkeypatch.setattr(db, "_mem", {})
-    db.init_db()
-    yield
-    if hasattr(db._local, "conn") and db._local.conn:
-        db._local.conn.close()
-        db._local.conn = None
+pytestmark = pytest.mark.usefixtures("_isolated_db")
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -103,14 +90,6 @@ class _MockModel:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestTrainedModelsDB:
-    def test_table_exists_after_init_db(self):
-        import api.db as db
-        conn   = db._conn()
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
-        assert "trained_models" in tables
-
     def test_save_and_load_roundtrip(self):
         import api.db as db
         blob = _fake_blob()
@@ -407,15 +386,21 @@ class TestTrainForSymbol:
     def test_retrains_outdated_model(self):
         """Model stored 31 days ago → retrain even with few new bars."""
         import api.db as db
+        from sqlalchemy import update
+
         from api.advisor import STALE_MODEL_DAYS, train_for_symbol
+        from myquant.db import SessionLocal, TrainedModel
+
         old_ts = time.time() - (STALE_MODEL_DAYS + 1) * 86400
         db.save_model(self.SYMBOL, "lgbm_core", 259, "2025-02-01",
                       0.55, pickle.dumps(_MockModel()), self.FEATS)
-        # Manually back-date trained_at
-        conn = db._conn()
-        conn.execute("UPDATE trained_models SET trained_at=? WHERE id=?",
-                     (old_ts, f"{self.SYMBOL}_lgbm_core"))
-        conn.commit()
+        # Manually back-date trained_at to simulate an aged model.
+        with SessionLocal() as s, s.begin():
+            s.execute(
+                update(TrainedModel)
+                .where(TrainedModel.id == f"{self.SYMBOL}_lgbm_core")
+                .values(trained_at=old_ts)
+            )
 
         result = train_for_symbol(self.SYMBOL, force=False)
         assert result["train_status"] == "trained"

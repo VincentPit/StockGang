@@ -25,7 +25,8 @@ tushare>=1.2.89          # Tushare Pro (A-share data, requires token)
 redis[asyncio]>=5.0.0
 SQLAlchemy[asyncio]>=2.0.0
 asyncpg>=0.29.0          # PostgreSQL async driver
-psycopg2-binary>=2.9.0   # Sync driver (for Alembic migrations)
+psycopg2-binary>=2.9.0   # Sync driver — used by Alembic and api/db.py shim
+alembic>=1.13.0          # Schema migrations
 
 # ── Broker SDKs ───────────────────────────────────────────────
 futu-api>=9.0.0          # Futu OpenAPI (HK/US/A-share)

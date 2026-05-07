@@ -17,25 +17,12 @@ Coverage
 from __future__ import annotations
 
 import pickle
-import threading
 
 import numpy as np
 import pandas as pd
 import pytest
 
-# ── Isolated DB ───────────────────────────────────────────────────────────────
-
-@pytest.fixture(autouse=True)
-def _isolated_db(tmp_path, monkeypatch):
-    import api.db as db
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test_causal.db")
-    monkeypatch.setattr(db, "_local", threading.local())
-    monkeypatch.setattr(db, "_mem", {})
-    db.init_db()
-    yield
-    if hasattr(db._local, "conn") and db._local.conn:
-        db._local.conn.close()
-        db._local.conn = None
+pytestmark = pytest.mark.usefixtures("_isolated_db")
 
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────

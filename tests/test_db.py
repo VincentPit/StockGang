@@ -1,40 +1,14 @@
 """
 Tests for api/db.py — L1/L2 cache behaviour, job persistence, stats, purge.
-No network calls.  Uses a temp file for the SQLite db to stay isolated.
+
+The ``_isolated_db`` fixture in tests/conftest.py truncates every table and
+clears the L1 cache before each test in this module.
 """
 from __future__ import annotations
 
 import pytest
 
-# ── Fixtures ───────────────────────────────────────────────────────────────────
-
-@pytest.fixture(autouse=True)
-def _isolated_db(tmp_path, monkeypatch):
-    """
-    Redirect DB_PATH to a temporary file and reset module-level state
-    (_mem dict, thread-local connection) before every test so tests
-    never share data with each other or with the real data/myquant.db.
-    """
-    import api.db as db
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
-
-    # Re-initialise _local so a fresh connection is created for this temp file
-    import threading
-    monkeypatch.setattr(db, "_local", threading.local())
-    monkeypatch.setattr(db, "_mem",   {})
-
-    db.init_db()
-    yield
-    # Cleanup: close the thread-local connection if open
-    if hasattr(db._local, "conn") and db._local.conn:
-        db._local.conn.close()
-        db._local.conn = None
-
-
-@pytest.fixture
-def db():
-    import api.db as _db
-    return _db
+pytestmark = pytest.mark.usefixtures("_isolated_db")
 
 
 # ── init_db ────────────────────────────────────────────────────────────────────
@@ -44,18 +18,8 @@ class TestInitDB:
         """Calling init_db twice must not raise or corrupt the schema."""
         db.init_db()
         db.init_db()
-        # If tables exist the stat call should succeed with no errors
         stats = db.cache_stats()
         assert stats["total"] == 0
-
-    def test_tables_created(self, db):
-        """Both tables must exist after init."""
-        conn = db._conn()
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
-        assert "jobs"  in tables
-        assert "cache" in tables
 
 
 # ── cache_set / cache_get ──────────────────────────────────────────────────────
@@ -69,11 +33,15 @@ class TestCacheSetGet:
         db.cache_set("fund:TEST", {"pe": 12.5}, ttl=60)
         assert "fund:TEST" in db._mem
 
-    def test_l1_hit_returns_without_sqlite(self, db, monkeypatch):
-        """If L1 is warm, _conn should not be consulted."""
+    def test_l1_hit_returns_without_db(self, db, monkeypatch):
+        """If L1 is warm, the Postgres session must not be consulted."""
         db.cache_set("news:TEST:10", {"items": []}, ttl=60)
-        # Replace _conn with a function that raises to detect any SQLite access
-        monkeypatch.setattr(db, "_conn", lambda: (_ for _ in ()).throw(AssertionError("SQLite accessed on L1 hit")))
+
+        def _boom(*_a, **_kw):
+            raise AssertionError("Postgres session opened on an L1 hit")
+
+        # Catch any attempt to open a session for the duration of the assertion.
+        monkeypatch.setattr(db, "SessionLocal", _boom)
         result = db.cache_get("news:TEST:10")
         assert result == {"items": []}
 
@@ -248,17 +216,6 @@ class TestTrainedModels:
 
     def _blob(self, payload: dict = None) -> bytes:
         return _pickle.dumps(payload or {"w": [1.0, 2.0, 3.0]})
-
-    # ── table creation ────────────────────────────────────────────────────────
-
-    def test_trained_models_table_created(self):
-        import api.db as db
-        conn   = db._conn()
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
-        assert "trained_models" in tables, \
-            "init_db() must create the trained_models table"
 
     # ── basic roundtrip ───────────────────────────────────────────────────────
 

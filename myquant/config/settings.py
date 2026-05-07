@@ -44,8 +44,17 @@ class Settings:
 
     @property
     def POSTGRES_DSN(self) -> str:
+        """Async DSN — used by myquant/db/engine.py for asyncpg-backed sessions."""
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
+
+    @property
+    def POSTGRES_DSN_SYNC(self) -> str:
+        """Sync DSN — used by Alembic and the api/db.py compatibility shim."""
+        return (
+            f"postgresql+psycopg2://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 
